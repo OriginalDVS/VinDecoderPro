@@ -5,36 +5,36 @@ import re
 import time
 import os
 
-# --- УСТАНОВКА ЗАВИСИМОСТЕЙ ПРИ СТАРТЕ ---
+# --- УСТАНОВКА ЗАВИСИМОСТЕЙ (ДЛЯ ОБЛАКА) ---
 @st.cache_resource
 def install_system_dependencies():
-    # Установка Playwright и браузера Chromium
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright"])
     
     subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"])
+    # Установка зависимостей для Linux
     subprocess.run([sys.executable, "-m", "playwright", "install-deps"])
 
 install_system_dependencies()
 
 from playwright.sync_api import sync_playwright
 
-# --- ФУНКЦИИ ЛОГИКИ (ИЗ ВАШЕГО РАБОЧЕГО КОДА) ---
+# --- ФУНКЦИИ ЛОГИКИ ---
 def extract_code(text):
     if not text: return None
     match = re.search(r'([A-Z0-9]{5,20})$', text.strip())
     return match.group(1) if match else None
 
 def find_part(page, base_url, path, node_kws, part_kws, code_prefix):
-    # 1. Переход по URL
+    # Переход
     try:
         page.goto(base_url, timeout=60000)
         page.wait_for_load_state()
     except: return None
 
-    # 2. Навигация по папкам (ТОЧНО КАК В TKINTER)
+    # Навигация
     for step in path:
         try:
             page.locator(f"p.catalog-node__name:has-text('{step}')").first.click()
@@ -47,7 +47,7 @@ def find_part(page, base_url, path, node_kws, part_kws, code_prefix):
     working_page = page
     needs_close = False
 
-    # 3. Если списка нет - ищем узел
+    # Если списка нет - ищем узел
     if page.locator('.goods__item').count() == 0:
         nodes = page.locator('.node-item').all()
         target = None
@@ -64,7 +64,7 @@ def find_part(page, base_url, path, node_kws, part_kws, code_prefix):
             needs_close = True
         else: return None
 
-    # 4. Поиск детали
+    # Поиск детали
     final = None
     try:
         working_page.wait_for_selector('.goods__item', timeout=15000)
@@ -96,11 +96,12 @@ def find_part(page, base_url, path, node_kws, part_kws, code_prefix):
     return final
 
 def run_search(vin, mode):
+    # Плейсхолдеры для UI обновлений внутри функции
     status_box = st.empty()
     results = []
     
     with sync_playwright() as p:
-        # ВАЖНО: Настройки для запуска в облаке (Linux)
+        # Настройки для облака
         browser = p.chromium.launch(
             headless=True,
             args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
@@ -114,28 +115,67 @@ def run_search(vin, mode):
             page.get_by_role("searchbox").fill(vin)
             page.locator("button.search-button").click()
             
+            # 1. Получаем данные об авто (Если режим CHECK)
+            if mode == "CHECK":
+                data = {'car_name': 'Неизвестно', 'model_code': '', 'date': '-', 'engine': None, 'drive': '-'}
+                
+                # Заголовок H1
+                try:
+                    page.wait_for_selector("h1.catalog-originals-heading", timeout=10000)
+                    raw_title = page.locator("h1.catalog-originals-heading").inner_text()
+                    clean_title = raw_title.replace("Запчасти для", "").strip()
+                    parts = clean_title.split()
+                    if len(parts) > 1:
+                        data['car_name'] = " ".join(parts[:-1]) # Без последнего слова
+                    else:
+                        data['car_name'] = clean_title
+                except: pass
+
+                # Параметры
+                try:
+                    page.locator('tui-icon[title="Параметры автомобиля"]').click()
+                    page.wait_for_selector('.dialog-car-attributes__item', timeout=15000)
+                    items = page.locator('.dialog-car-attributes__item').all()
+
+                    for item in items:
+                        name = item.locator('.dialog-car-attributes__item-name').inner_text()
+                        val = item.locator('.dialog-car-attributes__item-value').inner_text().strip()
+
+                        if "Номер двигателя" in name:
+                            if len(val) > 3: data['engine'] = val[:4].upper()
+                        elif "Дата выпуска" in name:
+                            data['date'] = val
+                        elif "Модель:" in name or ("Модель" in name and "год" not in name):
+                            data['model_code'] = val
+                        elif "Опции" in name:
+                            # --- ЛОГИКА ПРИВОДА (КЛИК ПО КНОПКЕ) ---
+                            try:
+                                item.scroll_into_view_if_needed()
+                                show_more = item.locator('.dialog-car-attributes__item_show-more')
+                                if show_more.count() > 0 and show_more.is_visible():
+                                    show_more.click()
+                                    time.sleep(0.5)
+                            except: pass
+                            
+                            opt_text = item.locator('.dialog-car-attributes__item-value').inner_text().upper()
+                            if "4WD" in opt_text: data['drive'] = "4WD (Полный)"
+                            elif "2WD" in opt_text: data['drive'] = "2WD (Передний)"
+                except:
+                    return "NOT_FOUND"
+
+                status_box.empty()
+                return data
+
+            # 2. Поиск запчастей (Если режим G4NA/G4KE)
+            # Нам нужно снова найти двигатель, чтобы кликнуть по нему
+            status_box.info(f"Заход в каталог двигателя...")
+            
+            # Закрываем параметры если открыты
             try:
                 page.locator('tui-icon[title="Параметры автомобиля"]').click()
-                page.wait_for_selector('.dialog-car-attributes__item', timeout=15000)
-            except:
-                return "NOT_FOUND"
+                page.wait_for_selector('.dialog-car-attributes__item')
+            except: pass
 
-            # Читаем модель
-            model = "Unknown"
-            full_model_name = ""
-            items = page.locator('.dialog-car-attributes__item').all()
-            for item in items:
-                if "Номер двигателя" in item.inner_text():
-                    val = item.locator('.dialog-car-attributes__item-value').inner_text().strip()
-                    full_model_name = val
-                    if len(val) > 3: model = val[:4].upper()
-                    break
-            
-            if mode == "CHECK":
-                return full_model_name, model
-
-            # Переход в двигатель
-            status_box.info(f"Двигатель {model}. Заход в каталог...")
             page.reload(); page.wait_for_load_state()
             try:
                 page.locator("p.catalog-node__name:has-text('Двигатель')").first.click()
@@ -143,7 +183,6 @@ def run_search(vin, mode):
             except: pass
             base_url = page.url
 
-            # === ЛОГИКА ПОИСКА (КАК В TKINTER) ===
             if mode == "G4NA":
                 status_box.info("Ищу Впускной распредвал...")
                 res = find_part(page, base_url, 
@@ -158,75 +197,90 @@ def run_search(vin, mode):
                 results.append(("Распредвал Выпуск", res))
 
             elif mode == "G4KE":
-                # ВАШИ ПРАВИЛЬНЫЕ ПУТИ
                 status_box.info("Ищу Лобную крышку...")
                 res = find_part(page, base_url,
                     ["Блок-картер", "Блок-картер"], 
-                    ["крышка", "ременного"], 
-                    None, "21350")
+                    ["крышка", "ременного"], None, "21350")
                 results.append(("Лобная крышка", res))
 
                 status_box.info("Ищу Кронштейн...")
                 res = find_part(page, base_url,
                     ["Крепление двигателя", "Кронштейн двигателя"], 
-                    ["подвеска", "двигателя"], 
-                    None, "21670")
+                    ["подвеска", "двигателя"], None, "21670")
                 results.append(("Кронштейн", res))
 
-            status_box.success("Готово!")
+            status_box.empty()
             return results
 
         finally:
             browser.close()
 
-# --- ИНТЕРФЕЙС (ВЕБ) ---
+# --- ИНТЕРФЕЙС STREAMLIT ---
 st.set_page_config(page_title="VIN Decoder", page_icon="⚙️")
-st.title("VIN DECODER")
 
-if 'model' not in st.session_state:
-    st.session_state['model'] = None
-    st.session_state['code'] = None
+st.title("VIN DECODER ULTIMATE")
 
-vin = st.text_input("VIN код:", max_chars=17).upper().strip()
+if 'car_data' not in st.session_state:
+    st.session_state['car_data'] = None
 
-if st.button("🔍 ОПРЕДЕЛИТЬ ДВИГАТЕЛЬ", type="primary"):
+vin = st.text_input("Введите VIN код:", max_chars=17).upper().strip()
+
+if st.button("🔍 ПОЛУЧИТЬ ДАННЫЕ", type="primary"):
     if len(vin) == 17:
-        with st.spinner('Подключение к базе...'):
+        st.session_state['car_data'] = None # Сброс старого
+        with st.spinner('Сбор информации об автомобиле...'):
             res = run_search(vin, "CHECK")
             if res == "NOT_FOUND":
-                st.error("НЕ НАЙДЕНО")
+                st.error("Автомобиль не найден или ошибка доступа")
             else:
-                st.session_state['model'] = res[0]
-                st.session_state['code'] = res[1]
+                st.session_state['car_data'] = res
     else:
-        st.warning("Нужно 17 символов")
+        st.warning("VIN должен содержать 17 символов")
 
-if st.session_state['model']:
-    st.header(st.session_state['model'])
-    eng = st.session_state['code']
-
-    if "G4NA" in eng:
-        if st.button("🔧 НАЙТИ РАСПРЕДВАЛЫ"):
-            with st.spinner('Поиск...'):
-                data = run_search(vin, "G4NA")
-                for title, item in data:
-                    with st.expander(title, expanded=True):
-                        if item:
-                            st.write(item['text'])
-                            st.code(item['code'], language="text")
-                        else:
-                            st.error("Не найдено")
+# Отображение результатов
+if st.session_state['car_data']:
+    data = st.session_state['car_data']
     
-    elif "G4KE" in eng:
-        if st.button("🛠️ НАЙТИ КРЕПЛЕНИЕ"):
-            with st.spinner('Поиск...'):
-                data = run_search(vin, "G4KE")
-                for title, item in data:
+    # 1. Заголовок (Название машины)
+    st.header(data.get('car_name', 'Неизвестно'))
+    
+    # 2. Код модели (отдельно, серым)
+    if data.get('model_code'):
+        st.caption(f"Код модели: {data['model_code']}")
+    
+    # 3. Характеристики (в колонках)
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Дата выпуска", data.get('date', '-'))
+    col2.metric("Привод", data.get('drive', '-'))
+    col3.metric("Двигатель", data.get('engine', '---'))
+    
+    st.divider()
+
+    # 4. Логика кнопок поиска
+    engine = data.get('engine', '')
+    
+    if engine and "G4NA" in engine:
+        if st.button("🔧 НАЙТИ РАСПРЕДВАЛЫ (G4NA)", type="primary"):
+            with st.spinner('Поиск деталей в каталоге...'):
+                parts = run_search(vin, "G4NA")
+                for title, item in parts:
                     with st.expander(title, expanded=True):
                         if item:
                             st.write(item['text'])
                             st.code(item['code'], language="text")
                         else:
                             st.error("Не найдено")
-    else:
-        st.info("Нет сценария поиска для этого двигателя.")
+
+    elif engine and "G4KE" in engine:
+        if st.button("🛠️ НАЙТИ КРЕПЛЕНИЕ (G4KE)", type="primary"):
+            with st.spinner('Поиск деталей в каталоге...'):
+                parts = run_search(vin, "G4KE")
+                for title, item in parts:
+                    with st.expander(title, expanded=True):
+                        if item:
+                            st.write(item['text'])
+                            st.code(item['code'], language="text")
+                        else:
+                            st.error("Не найдено")
+    elif engine:
+        st.info("Для этого двигателя нет автоматического поиска запчастей.")
