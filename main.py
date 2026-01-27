@@ -5,7 +5,7 @@ import re
 import time
 import os
 
-# --- УСТАНОВКА ЗАВИСИМОСТЕЙ (ДЛЯ ОБЛАКА) ---
+# --- УСТАНОВКА ЗАВИСИМОСТЕЙ ---
 @st.cache_resource
 def install_system_dependencies():
     try:
@@ -14,7 +14,6 @@ def install_system_dependencies():
         subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright"])
     
     subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"])
-    # Установка зависимостей для Linux
     subprocess.run([sys.executable, "-m", "playwright", "install-deps"])
 
 install_system_dependencies()
@@ -28,13 +27,11 @@ def extract_code(text):
     return match.group(1) if match else None
 
 def find_part(page, base_url, path, node_kws, part_kws, code_prefix):
-    # Переход
     try:
         page.goto(base_url, timeout=60000)
         page.wait_for_load_state()
     except: return None
 
-    # Навигация
     for step in path:
         try:
             page.locator(f"p.catalog-node__name:has-text('{step}')").first.click()
@@ -47,7 +44,6 @@ def find_part(page, base_url, path, node_kws, part_kws, code_prefix):
     working_page = page
     needs_close = False
 
-    # Если списка нет - ищем узел
     if page.locator('.goods__item').count() == 0:
         nodes = page.locator('.node-item').all()
         target = None
@@ -64,7 +60,6 @@ def find_part(page, base_url, path, node_kws, part_kws, code_prefix):
             needs_close = True
         else: return None
 
-    # Поиск детали
     final = None
     try:
         working_page.wait_for_selector('.goods__item', timeout=15000)
@@ -96,12 +91,10 @@ def find_part(page, base_url, path, node_kws, part_kws, code_prefix):
     return final
 
 def run_search(vin, mode):
-    # Плейсхолдеры для UI обновлений внутри функции
     status_box = st.empty()
     results = []
     
     with sync_playwright() as p:
-        # Настройки для облака
         browser = p.chromium.launch(
             headless=True,
             args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
@@ -115,23 +108,21 @@ def run_search(vin, mode):
             page.get_by_role("searchbox").fill(vin)
             page.locator("button.search-button").click()
             
-            # 1. Получаем данные об авто (Если режим CHECK)
+            # --- РЕЖИМ ПРОВЕРКИ АВТО ---
             if mode == "CHECK":
                 data = {'car_name': 'Неизвестно', 'model_code': '', 'date': '-', 'engine': None, 'drive': '-'}
                 
-                # Заголовок H1
                 try:
                     page.wait_for_selector("h1.catalog-originals-heading", timeout=10000)
                     raw_title = page.locator("h1.catalog-originals-heading").inner_text()
                     clean_title = raw_title.replace("Запчасти для", "").strip()
                     parts = clean_title.split()
                     if len(parts) > 1:
-                        data['car_name'] = " ".join(parts[:-1]) # Без последнего слова
+                        data['car_name'] = " ".join(parts[:-1])
                     else:
                         data['car_name'] = clean_title
                 except: pass
 
-                # Параметры
                 try:
                     page.locator('tui-icon[title="Параметры автомобиля"]').click()
                     page.wait_for_selector('.dialog-car-attributes__item', timeout=15000)
@@ -148,7 +139,6 @@ def run_search(vin, mode):
                         elif "Модель:" in name or ("Модель" in name and "год" not in name):
                             data['model_code'] = val
                         elif "Опции" in name:
-                            # --- ЛОГИКА ПРИВОДА (КЛИК ПО КНОПКЕ) ---
                             try:
                                 item.scroll_into_view_if_needed()
                                 show_more = item.locator('.dialog-car-attributes__item_show-more')
@@ -166,11 +156,9 @@ def run_search(vin, mode):
                 status_box.empty()
                 return data
 
-            # 2. Поиск запчастей (Если режим G4NA/G4KE)
-            # Нам нужно снова найти двигатель, чтобы кликнуть по нему
+            # --- РЕЖИМ ПОИСКА ЗАПЧАСТЕЙ ---
             status_box.info(f"Заход в каталог двигателя...")
             
-            # Закрываем параметры если открыты
             try:
                 page.locator('tui-icon[title="Параметры автомобиля"]').click()
                 page.wait_for_selector('.dialog-car-attributes__item')
@@ -225,9 +213,9 @@ if 'car_data' not in st.session_state:
 
 vin = st.text_input("Введите VIN код:", max_chars=17).upper().strip()
 
-if st.button("🔍 ПОЛУЧИТЬ ДАННЫЕ", type="primary"):
+if st.button("🔍 ПОЛУЧИТЬ ДАННЫЕ", type="primary", use_container_width=True):
     if len(vin) == 17:
-        st.session_state['car_data'] = None # Сброс старого
+        st.session_state['car_data'] = None 
         with st.spinner('Сбор информации об автомобиле...'):
             res = run_search(vin, "CHECK")
             if res == "NOT_FOUND":
@@ -237,30 +225,32 @@ if st.button("🔍 ПОЛУЧИТЬ ДАННЫЕ", type="primary"):
     else:
         st.warning("VIN должен содержать 17 символов")
 
-# Отображение результатов
+# ОТОБРАЖЕНИЕ РЕЗУЛЬТАТОВ
 if st.session_state['car_data']:
     data = st.session_state['car_data']
     
     # 1. Заголовок (Название машины)
     st.header(data.get('car_name', 'Неизвестно'))
     
-    # 2. Код модели (отдельно, серым)
+    # 2. Код модели (серым, отдельно)
     if data.get('model_code'):
         st.caption(f"Код модели: {data['model_code']}")
     
-    # 3. Характеристики (в колонках)
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Дата выпуска", data.get('date', '-'))
-    col2.metric("Привод", data.get('drive', '-'))
-    col3.metric("Двигатель", data.get('engine', '---'))
+    st.divider()
+
+    # 3. ХАРАКТЕРИСТИКИ В СТОЛБИК (Вертикально)
+    # Используем markdown для красивого и компактного вида
+    st.markdown(f"**📅 Дата выпуска:** {data.get('date', '-')}")
+    st.markdown(f"**⚙️ Привод:** {data.get('drive', '-')}")
+    st.markdown(f"**🚀 Двигатель:** {data.get('engine', '---')}")
     
     st.divider()
 
-    # 4. Логика кнопок поиска
+    # 4. КНОПКИ ПОИСКА
     engine = data.get('engine', '')
     
     if engine and "G4NA" in engine:
-        if st.button("🔧 НАЙТИ РАСПРЕДВАЛЫ (G4NA)", type="primary"):
+        if st.button("🔧 НАЙТИ РАСПРЕДВАЛЫ (G4NA)", type="primary", use_container_width=True):
             with st.spinner('Поиск деталей в каталоге...'):
                 parts = run_search(vin, "G4NA")
                 for title, item in parts:
@@ -272,7 +262,7 @@ if st.session_state['car_data']:
                             st.error("Не найдено")
 
     elif engine and "G4KE" in engine:
-        if st.button("🛠️ НАЙТИ КРЕПЛЕНИЕ (G4KE)", type="primary"):
+        if st.button("🛠️ НАЙТИ КРЕПЛЕНИЕ (G4KE)", type="primary", use_container_width=True):
             with st.spinner('Поиск деталей в каталоге...'):
                 parts = run_search(vin, "G4KE")
                 for title, item in parts:
