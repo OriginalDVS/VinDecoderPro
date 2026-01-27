@@ -2,128 +2,115 @@ import streamlit as st
 import subprocess
 import sys
 import re
+import time
 import os
 
-# --- УСТАНОВКА БРАУЗЕРОВ (КЭШИРУЕМ, ЧТОБЫ НЕ КАЧАТЬ КАЖДЫЙ РАЗ) ---
+# --- УСТАНОВКА ЗАВИСИМОСТЕЙ ПРИ СТАРТЕ ---
 @st.cache_resource
-def install_browsers():
-    print("Проверка установки Playwright...")
+def install_system_dependencies():
+    # Установка Playwright и браузера Chromium
     try:
-        # Пробуем импортировать, если нет - ставим
         from playwright.sync_api import sync_playwright
     except ImportError:
         subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright"])
     
-    # Установка бинарников браузера
-    print("Установка Chromium...")
     subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"])
-    # Установка зависимостей (на всякий случай, хотя packages.txt лучше)
     subprocess.run([sys.executable, "-m", "playwright", "install-deps"])
 
-# Запускаем установку при старте
-install_browsers()
+install_system_dependencies()
 
 from playwright.sync_api import sync_playwright
 
-# --- ФУНКЦИИ ЛОГИКИ ---
+# --- ФУНКЦИИ ЛОГИКИ (ИЗ ВАШЕГО РАБОЧЕГО КОДА) ---
 def extract_code(text):
     if not text: return None
     match = re.search(r'([A-Z0-9]{5,20})$', text.strip())
     return match.group(1) if match else None
 
 def find_part(page, base_url, path, node_kws, part_kws, code_prefix):
+    # 1. Переход по URL
     try:
         page.goto(base_url, timeout=60000)
         page.wait_for_load_state()
-        
-        for step in path:
+    except: return None
+
+    # 2. Навигация по папкам (ТОЧНО КАК В TKINTER)
+    for step in path:
+        try:
             page.locator(f"p.catalog-node__name:has-text('{step}')").first.click()
             time.sleep(0.5)
-
-        try: 
-            page.wait_for_selector('.goods__item, .node-item', timeout=10000)
         except: return None
 
-        working_page = page
-        needs_close = False
+    try: page.wait_for_selector('.goods__item, .node-item', timeout=8000)
+    except: return None
 
-        # Если списка нет - ищем узел
-        if page.locator('.goods__item').count() == 0:
-            nodes = page.locator('.node-item').all()
-            target = None
-            for n in nodes:
-                if all(k in n.inner_text().lower() for k in node_kws):
-                    target = n; break
-            if not target and 'any' in node_kws and nodes: target = nodes[0]
+    working_page = page
+    needs_close = False
 
-            if target:
-                with page.context.expect_page() as new_p:
-                    target.locator("a:has-text('Показать все')").first.click()
-                working_page = new_p.value
-                working_page.wait_for_load_state()
-                needs_close = True
-            else: return None
+    # 3. Если списка нет - ищем узел
+    if page.locator('.goods__item').count() == 0:
+        nodes = page.locator('.node-item').all()
+        target = None
+        for n in nodes:
+            if all(k in n.inner_text().lower() for k in node_kws):
+                target = n; break
+        if not target and 'any' in node_kws and nodes: target = nodes[0]
 
-        final = None
-        try:
-            working_page.wait_for_selector('.goods__item', timeout=15000)
-            box = working_page.locator('.box-goods')
-            if box.count(): 
-                box.evaluate("el => el.scrollTop = el.scrollHeight")
-                time.sleep(0.5)
+        if target:
+            with page.context.expect_page() as new_p:
+                target.locator("a:has-text('Показать все')").first.click()
+            working_page = new_p.value
+            working_page.wait_for_load_state()
+            needs_close = True
+        else: return None
 
-            goods = working_page.locator('.goods__item').all()
-            href = None
-            for g in goods:
-                txt = g.inner_text().lower()
-                if part_kws and all(w in txt for w in part_kws):
-                    href = g.locator('a.goods__item-link').get_attribute('href'); break
-                if code_prefix and code_prefix in txt:
-                    href = g.locator('a.goods__item-link').get_attribute('href'); break
-            
-            if href:
-                working_page.goto("https://www.autodoc.ru" + href, timeout=60000)
-                try:
-                    working_page.wait_for_selector('.properties__description-text', timeout=10000)
-                    desc = working_page.locator('.properties__description-text').inner_text()
-                    final = {'text': desc, 'code': extract_code(desc)}
-                except: pass
-        except: pass
-        finally:
-            if needs_close: working_page.close()
-        return final
-    except Exception as e:
-        print(f"Ошибка в find_part: {e}")
-        return None
+    # 4. Поиск детали
+    final = None
+    try:
+        working_page.wait_for_selector('.goods__item', timeout=15000)
+        box = working_page.locator('.box-goods')
+        if box.count(): 
+            box.evaluate("el => el.scrollTop = el.scrollHeight")
+            time.sleep(0.5)
+
+        goods = working_page.locator('.goods__item').all()
+        href = None
+        for g in goods:
+            txt = g.inner_text().lower()
+            if part_kws and all(w in txt for w in part_kws):
+                href = g.locator('a.goods__item-link').get_attribute('href'); break
+            if code_prefix and code_prefix in txt:
+                href = g.locator('a.goods__item-link').get_attribute('href'); break
+        
+        if href:
+            working_page.goto("https://www.autodoc.ru" + href, timeout=60000)
+            try:
+                working_page.wait_for_selector('.properties__description-text', timeout=10000)
+                desc = working_page.locator('.properties__description-text').inner_text()
+                final = {'text': desc, 'code': extract_code(desc)}
+            except: pass
+    except: pass
+    finally:
+        if needs_close: working_page.close()
+    
+    return final
 
 def run_search(vin, mode):
-    status_text = st.empty()
+    status_box = st.empty()
     results = []
     
     with sync_playwright() as p:
-        # !!! ВАЖНОЕ ИЗМЕНЕНИЕ ДЛЯ ОБЛАКА !!!
-        # Добавляем аргументы --no-sandbox и --disable-dev-shm-usage
+        # ВАЖНО: Настройки для запуска в облаке (Linux)
         browser = p.chromium.launch(
             headless=True,
-            args=[
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--no-zygote',
-                '--single-process',
-                '--disable-gpu'
-            ]
+            args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
         )
-        
         context = browser.new_context(viewport={'width': 1920, 'height': 1080})
         page = context.new_page()
         
         try:
-            status_text.info("Загрузка сайта...")
+            status_box.info("Вход на сайт...")
             page.goto("https://www.autodoc.ru/", timeout=60000)
-            
             page.get_by_role("searchbox").fill(vin)
             page.locator("button.search-button").click()
             
@@ -133,9 +120,10 @@ def run_search(vin, mode):
             except:
                 return "NOT_FOUND"
 
+            # Читаем модель
             model = "Unknown"
-            items = page.locator('.dialog-car-attributes__item').all()
             full_model_name = ""
+            items = page.locator('.dialog-car-attributes__item').all()
             for item in items:
                 if "Номер двигателя" in item.inner_text():
                     val = item.locator('.dialog-car-attributes__item-value').inner_text().strip()
@@ -143,78 +131,83 @@ def run_search(vin, mode):
                     if len(val) > 3: model = val[:4].upper()
                     break
             
-            if mode == "CHECK_MODEL":
+            if mode == "CHECK":
                 return full_model_name, model
 
-            status_text.info(f"Двигатель {model}. Заход в каталог...")
-            
-            # Обход всплывающих окон при перезагрузке
-            page.reload()
-            page.wait_for_load_state()
+            # Переход в двигатель
+            status_box.info(f"Двигатель {model}. Заход в каталог...")
+            page.reload(); page.wait_for_load_state()
             try:
                 page.locator("p.catalog-node__name:has-text('Двигатель')").first.click()
                 time.sleep(1)
             except: pass
             base_url = page.url
 
-            import time # Импорт внутри для надежности
-            
+            # === ЛОГИКА ПОИСКА (КАК В TKINTER) ===
             if mode == "G4NA":
-                status_text.info("Поиск: Впускной распредвал...")
-                res = find_part(page, base_url, ["Механизм газораспределения", "Распредвал", "Шестерня распредвала"], ['any'], ['распредвал', 'впуск'], None)
+                status_box.info("Ищу Впускной распредвал...")
+                res = find_part(page, base_url, 
+                    ["Механизм газораспределения", "Распредвал", "Шестерня распредвала"],
+                    ['any'], ['распредвал', 'впуск'], None)
                 results.append(("Распредвал Впуск", res))
-                
-                status_text.info("Поиск: Выпускной распредвал...")
-                res = find_part(page, base_url, ["Механизм газораспределения", "Распредвал", "Шестерня распредвала"], ['any'], ['распредвал', 'выпуск'], None)
+
+                status_box.info("Ищу Выпускной распредвал...")
+                res = find_part(page, base_url, 
+                    ["Механизм газораспределения", "Распредвал", "Шестерня распредвала"],
+                    ['any'], ['распредвал', 'выпуск'], None)
                 results.append(("Распредвал Выпуск", res))
 
             elif mode == "G4KE":
-                status_text.info("Поиск: Лобная крышка...")
-                res = find_part(page, base_url, ["Блок-картер", "Блок-картер"], ["крышка", "ременного"], None, "21350")
+                # ВАШИ ПРАВИЛЬНЫЕ ПУТИ
+                status_box.info("Ищу Лобную крышку...")
+                res = find_part(page, base_url,
+                    ["Блок-картер", "Блок-картер"], 
+                    ["крышка", "ременного"], 
+                    None, "21350")
                 results.append(("Лобная крышка", res))
 
-                status_text.info("Поиск: Кронштейн...")
-                res = find_part(page, base_url, ["Крепление двигателя", "Кронштейн двигателя"], ["подвеска", "двигателя"], None, "21670")
+                status_box.info("Ищу Кронштейн...")
+                res = find_part(page, base_url,
+                    ["Крепление двигателя", "Кронштейн двигателя"], 
+                    ["подвеска", "двигателя"], 
+                    None, "21670")
                 results.append(("Кронштейн", res))
 
-            status_text.success("Готово!")
+            status_box.success("Готово!")
             return results
 
         finally:
             browser.close()
 
-# --- ИНТЕРФЕЙС STREAMLIT ---
-st.set_page_config(page_title="VIN Decoder", page_icon="🚗")
+# --- ИНТЕРФЕЙС (ВЕБ) ---
+st.set_page_config(page_title="VIN Decoder", page_icon="⚙️")
+st.title("VIN DECODER")
 
-st.title("🚗 Поиск запчастей по VIN")
-st.markdown("Hyundai / Kia Engine Decoder")
+if 'model' not in st.session_state:
+    st.session_state['model'] = None
+    st.session_state['code'] = None
 
-if 'model_name' not in st.session_state:
-    st.session_state['model_name'] = None
-    st.session_state['engine_code'] = None
+vin = st.text_input("VIN код:", max_chars=17).upper().strip()
 
-vin = st.text_input("Введите VIN код (17 символов):", max_chars=17).upper().strip()
-
-if st.button("🔍 Найти автомобиль", type="primary"):
+if st.button("🔍 ОПРЕДЕЛИТЬ ДВИГАТЕЛЬ", type="primary"):
     if len(vin) == 17:
-        with st.spinner('Подключаюсь к базе...'):
-            res = run_search(vin, "CHECK_MODEL")
+        with st.spinner('Подключение к базе...'):
+            res = run_search(vin, "CHECK")
             if res == "NOT_FOUND":
-                st.error("Автомобиль не найден")
+                st.error("НЕ НАЙДЕНО")
             else:
-                st.session_state['model_name'] = res[0]
-                st.session_state['engine_code'] = res[1]
+                st.session_state['model'] = res[0]
+                st.session_state['code'] = res[1]
     else:
-        st.warning("VIN должен быть 17 символов")
+        st.warning("Нужно 17 символов")
 
-if st.session_state['model_name']:
-    st.success(f"Автомобиль найден: **{st.session_state['model_name']}**")
-    
-    eng = st.session_state['engine_code']
-    
+if st.session_state['model']:
+    st.header(st.session_state['model'])
+    eng = st.session_state['code']
+
     if "G4NA" in eng:
-        if st.button("🔧 НАЙТИ РАСПРЕДВАЛЫ (G4NA)"):
-            with st.spinner('Сканирование каталогов...'):
+        if st.button("🔧 НАЙТИ РАСПРЕДВАЛЫ"):
+            with st.spinner('Поиск...'):
                 data = run_search(vin, "G4NA")
                 for title, item in data:
                     with st.expander(title, expanded=True):
@@ -223,10 +216,10 @@ if st.session_state['model_name']:
                             st.code(item['code'], language="text")
                         else:
                             st.error("Не найдено")
-
+    
     elif "G4KE" in eng:
-        if st.button("🛠️ НАЙТИ КРЕПЛЕНИЕ (G4KE)"):
-            with st.spinner('Сканирование каталогов...'):
+        if st.button("🛠️ НАЙТИ КРЕПЛЕНИЕ"):
+            with st.spinner('Поиск...'):
                 data = run_search(vin, "G4KE")
                 for title, item in data:
                     with st.expander(title, expanded=True):
@@ -236,4 +229,4 @@ if st.session_state['model_name']:
                         else:
                             st.error("Не найдено")
     else:
-        st.info("Для этого двигателя пока нет сценария авто-поиска деталей.")
+        st.info("Нет сценария поиска для этого двигателя.")
