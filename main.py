@@ -9,13 +9,11 @@ import streamlit.components.v1 as components
 # --- УСТАНОВКА ЗАВИСИМОСТЕЙ ---
 @st.cache_resource
 def install_system_dependencies():
-    # Проверяем наличие playwright, если нет - ставим
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright"])
     
-    # Установка браузеров (делаем тихо, чтобы не засорять логи)
     try:
         subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=False)
         subprocess.run([sys.executable, "-m", "playwright", "install-deps"], check=False)
@@ -114,7 +112,6 @@ def run_search(vin, mode):
             page.get_by_role("searchbox").fill(vin)
             page.locator("button.search-button").click()
             
-            # --- РЕЖИМ ПРОВЕРКИ АВТО ---
             if mode == "CHECK":
                 data = {'car_name': 'Неизвестно', 'model_code': '', 'date': '-', 'engine': None, 'drive': '-'}
                 
@@ -123,10 +120,7 @@ def run_search(vin, mode):
                     raw_title = page.locator("h1.catalog-originals-heading").inner_text()
                     clean_title = raw_title.replace("Запчасти для", "").strip()
                     parts = clean_title.split()
-                    if len(parts) > 1:
-                        data['car_name'] = " ".join(parts[:-1])
-                    else:
-                        data['car_name'] = clean_title
+                    data['car_name'] = " ".join(parts[:-1]) if len(parts) > 1 else clean_title
                 except: pass
 
                 try:
@@ -162,9 +156,7 @@ def run_search(vin, mode):
                 status_box.empty()
                 return data
 
-            # --- РЕЖИМ ПОИСКА ЗАПЧАСТЕЙ ---
             status_box.info(f"Заход в каталог двигателя...")
-            
             try:
                 page.locator('tui-icon[title="Параметры автомобиля"]').click()
                 page.wait_for_selector('.dialog-car-attributes__item')
@@ -178,169 +170,121 @@ def run_search(vin, mode):
             base_url = page.url
 
             if mode == "G4NA":
-                status_box.info("Ищу Впускной распредвал...")
-                res = find_part(page, base_url, 
-                    ["Механизм газораспределения", "Распредвал", "Шестерня распредвала"],
-                    ['any'], ['распредвал', 'впуск'], None)
-                results.append(("Распредвал Впуск", res))
-
-                status_box.info("Ищу Выпускной распредвал...")
-                res = find_part(page, base_url, 
-                    ["Механизм газораспределения", "Распредвал", "Шестерня распредвала"],
-                    ['any'], ['распредвал', 'выпуск'], None)
-                results.append(("Распредвал Выпуск", res))
-
+                res1 = find_part(page, base_url, ["Механизм газораспределения", "Распредвал", "Шестерня распредвала"], ['any'], ['распредвал', 'впуск'], None)
+                results.append(("Распредвал Впуск", res1))
+                res2 = find_part(page, base_url, ["Механизм газораспределения", "Распредвал", "Шестерня распредвала"], ['any'], ['распредвал', 'выпуск'], None)
+                results.append(("Распредвал Выпуск", res2))
             elif mode == "G4KE":
-                status_box.info("Ищу Лобную крышку...")
-                res = find_part(page, base_url,
-                    ["Блок-картер", "Блок-картер"], 
-                    ["крышка", "ременного"], None, "21350")
-                results.append(("Лобная крышка", res))
-
-                status_box.info("Ищу Кронштейн...")
-                res = find_part(page, base_url,
-                    ["Крепление двигателя", "Кронштейн двигателя"], 
-                    ["подвеска", "двигателя"], None, "21670")
-                results.append(("Кронштейн", res))
+                res1 = find_part(page, base_url, ["Блок-картер", "Блок-картер"], ["крышка", "ременного"], None, "21350")
+                results.append(("Лобная крышка", res1))
+                res2 = find_part(page, base_url, ["Крепление двигателя", "Кронштейн двигателя"], ["подвеска", "двигателя"], None, "21670")
+                results.append(("Кронштейн", res2))
 
             status_box.empty()
             return results
-
         finally:
             browser.close()
 
-# --- ИНТЕРФЕЙС STREAMLIT ---
+# --- ИНТЕРФЕЙС ---
 st.set_page_config(page_title="VIN Decoder", page_icon="⚙️", layout="wide")
+
+# Компонент для вставки из буфера (JS)
+paste_component = """
+<div style="display: flex; align-items: flex-end; height: 100%;">
+    <button id="paste-btn" style="
+        background-color: #FF4B4B; color: white; border: none; padding: 0.5rem 1rem; 
+        border-radius: 0.5rem; cursor: pointer; font-weight: bold; width: 100%; height: 42px;">
+        📋 Вставить VIN
+    </button>
+</div>
+<script>
+    const btn = document.getElementById('paste-btn');
+    btn.addEventListener('click', async () => {
+        try {
+            const text = await navigator.clipboard.readText();
+            const inputFrame = window.parent.document;
+            const inputs = inputFrame.querySelectorAll('input[type="text"]');
+            if (inputs.length > 0) {
+                const input = inputs[0];
+                const cleanText = text.replace(/[^a-zA-Z0-9]/g, '').toUpperCase().substring(0, 17);
+                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+                setter.call(input, cleanText);
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+                input.focus();
+            }
+        } catch (err) { alert('Разрешите доступ к буферу обмена.'); }
+    });
+</script>
+"""
 
 st.title("VIN DECODER ULTIMATE")
 
 if 'car_data' not in st.session_state:
     st.session_state['car_data'] = None
 
-# --- КОМПОНЕНТ КНОПКИ ВСТАВКИ (JS) ---
-# Этот скрипт создает HTML-кнопку, которая имеет доступ к буферу браузера
-# и насильно вставляет текст в поле ввода Streamlit.
-paste_component = """
-<div style="display: flex; align-items: flex-end; height: 100%;">
-    <button id="paste-btn" style="
-        background-color: #FF4B4B; 
-        color: white; 
-        border: none; 
-        padding: 0.5rem 1rem; 
-        border-radius: 0.5rem; 
-        cursor: pointer; 
-        font-weight: bold;
-        width: 100%;
-        font-family: 'Source Sans Pro', sans-serif;">
-        📋 Вставить из буфера
-    </button>
-</div>
-
-<script>
-    const btn = document.getElementById('paste-btn');
-    btn.addEventListener('click', async () => {
-        try {
-            // Читаем текст из буфера обмена браузера
-            const text = await navigator.clipboard.readText();
-            
-            // Находим поле ввода Streamlit (обычно это input type="text")
-            const inputFrame = window.parent.document;
-            const inputs = inputFrame.querySelectorAll('input[type="text"]');
-            
-            // Берем первое найденное поле (поле VIN)
-            if (inputs.length > 0) {
-                const input = inputs[0];
-                
-                // Устанавливаем значение
-                // Оставляем только буквы и цифры
-                const cleanText = text.replace(/[^a-zA-Z0-9]/g, '').toUpperCase().substring(0, 17);
-                
-                // Эмулируем ввод пользователя, чтобы React (Streamlit) увидел изменения
-                const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-                nativeInputValueSetter.call(input, cleanText);
-                
-                input.dispatchEvent(new Event('input', { bubbles: true }));
-                input.dispatchEvent(new Event('change', { bubbles: true }));
-                input.focus();
-            } else {
-                console.error("Поле ввода не найдено");
-            }
-        } catch (err) {
-            console.error('Ошибка чтения буфера:', err);
-            alert('Пожалуйста, разрешите доступ к буферу обмена или используйте HTTPS.');
-        }
-    });
-</script>
-"""
-
-# Разметка колонок: Поле ввода (широкое) и Кнопка (узкая)
-col1, col2 = st.columns([4, 1], vertical_alignment="bottom")
-
+col1, col2 = st.columns([4, 1.2], vertical_alignment="bottom")
 with col1:
-    vin = st.text_input("Введите VIN код:", max_chars=17, key="vin_field").upper().strip()
-
+    vin = st.text_input("Введите VIN код (17 знаков):", max_chars=17, key="vin_field").upper().strip()
 with col2:
-    # Вставляем нашу JS-кнопку. Height=42 подгоняет высоту под поле ввода
-    components.html(paste_component, height=42)
+    components.html(paste_component, height=50)
 
-# Кнопка запуска поиска
 if st.button("🔍 ПОЛУЧИТЬ ДАННЫЕ", type="primary", use_container_width=True):
     if len(vin) == 17:
         st.session_state['car_data'] = None 
-        with st.spinner('Сбор информации об автомобиле...'):
+        with st.spinner('Сбор информации...'):
             res = run_search(vin, "CHECK")
             if res == "NOT_FOUND":
-                st.error("Автомобиль не найден или ошибка доступа")
+                st.error("Автомобиль не найден")
             else:
                 st.session_state['car_data'] = res
     else:
-        st.warning("VIN должен содержать 17 символов")
+        st.warning("VIN должен быть 17 символов")
 
-# ОТОБРАЖЕНИЕ РЕЗУЛЬТАТОВ
 if st.session_state['car_data']:
     data = st.session_state['car_data']
-    
     st.header(data.get('car_name', 'Неизвестно'))
     
-    if data.get('model_code'):
-        st.caption(f"Код модели: {data['model_code']}")
-    
-    st.divider()
+    # ВЫДЕЛЕННЫЙ ДВИГАТЕЛЬ (КРУПНО)
+    engine_name = data.get('engine', '---')
+    st.markdown(f"""
+        <div style="background-color: #0e1117; padding: 20px; border-radius: 10px; border: 2px solid #FF4B4B; text-align: center; margin: 10px 0;">
+            <p style="margin: 0; color: #808495; font-size: 16px; text-transform: uppercase; letter-spacing: 1px;">Модель двигателя</p>
+            <h1 style="margin: 0; color: #FF4B4B; font-size: 64px; font-weight: 900;">{engine_name}</h1>
+        </div>
+    """, unsafe_allow_html=True)
 
     col_info1, col_info2, col_info3 = st.columns(3)
     with col_info1:
-        st.markdown(f"**📅 Дата выпуска:**\n{data.get('date', '-')}")
+        st.markdown(f"**📅 Дата выпуска:** {data.get('date', '-')}")
     with col_info2:
-        st.markdown(f"**⚙️ Привод:**\n{data.get('drive', '-')}")
+        st.markdown(f"**⚙️ Привод:** {data.get('drive', '-')}")
     with col_info3:
-        st.markdown(f"**🚀 Двигатель:**\n{data.get('engine', '---')}")
+        st.caption(f"Код модели: {data.get('model_code', '-')}")
     
     st.divider()
 
     engine = data.get('engine', '')
-    
     if engine and "G4NA" in engine:
         if st.button("🔧 НАЙТИ РАСПРЕДВАЛЫ (G4NA)", type="primary", use_container_width=True):
-            with st.spinner('Поиск деталей в каталоге...'):
+            with st.spinner('Ищу в каталогах...'):
                 parts = run_search(vin, "G4NA")
                 for title, item in parts:
                     with st.expander(title, expanded=True):
                         if item:
                             st.write(item['text'])
                             st.code(item['code'], language="text")
-                        else:
-                            st.error("Не найдено")
+                        else: st.error("Не найдено")
 
     elif engine and "G4KE" in engine:
         if st.button("🛠️ НАЙТИ КРЕПЛЕНИЕ (G4KE)", type="primary", use_container_width=True):
-            with st.spinner('Поиск деталей в каталоге...'):
+            with st.spinner('Ищу в каталогах...'):
                 parts = run_search(vin, "G4KE")
                 for title, item in parts:
                     with st.expander(title, expanded=True):
                         if item:
                             st.write(item['text'])
                             st.code(item['code'], language="text")
-                        else:
-                            st.error("Не найдено")
+                        else: st.error("Не найдено")
     elif engine:
-        st.info("Для этого двигателя нет автоматического поиска запчастей.")
+        st.info("Автопоиск запчастей для этой модели не настроен.")
