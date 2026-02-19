@@ -6,17 +6,21 @@ import time
 import os
 import streamlit.components.v1 as components
 
-# --- УСТАНОВКА ЗАВИСИМОСТЕЙ (Вернул стабильную версию) ---
+# --- УСТАНОВКА ЗАВИСИМОСТЕЙ ---
 @st.cache_resource
 def install_system_dependencies():
+    # Проверяем наличие playwright, если нет - ставим
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright"])
     
-    # Установка браузеров
-    subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"])
-    subprocess.run([sys.executable, "-m", "playwright", "install-deps"])
+    # Установка браузеров (делаем тихо, чтобы не засорять логи)
+    try:
+        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=False)
+        subprocess.run([sys.executable, "-m", "playwright", "install-deps"], check=False)
+    except:
+        pass
 
 install_system_dependencies()
 
@@ -208,43 +212,78 @@ def run_search(vin, mode):
 # --- ИНТЕРФЕЙС STREAMLIT ---
 st.set_page_config(page_title="VIN Decoder", page_icon="⚙️", layout="wide")
 
-# --- JS СКРИПТ ДЛЯ ГОРЯЧИХ КЛАВИШ (RU/EN) ---
-# Скрипт ловит нажатие Ctrl+V глобально и переводит фокус в поле VIN
-hotkey_script = """
-<script>
-const doc = window.parent.document;
-doc.addEventListener('keydown', function(e) {
-    // Проверяем нажатие Ctrl (или Cmd) + V.
-    // e.code === 'KeyV' работает для любой раскладки (V на англ, М на рус)
-    if ((e.ctrlKey || e.metaKey) && e.code === 'KeyV') {
-        const inputs = doc.querySelectorAll('input[type="text"]');
-        if (inputs.length > 0) {
-            // Находим поле ввода VIN (обычно первое текстовое поле)
-            const vinInput = inputs[0];
-            if (vinInput && vinInput !== doc.activeElement) {
-                vinInput.focus();
-                // Мы НЕ отменяем событие (не делаем preventDefault), 
-                // чтобы браузер выполнил штатную вставку текста
-            }
-        }
-    }
-});
-</script>
-"""
-components.html(hotkey_script, height=0, width=0)
-
 st.title("VIN DECODER ULTIMATE")
 
 if 'car_data' not in st.session_state:
     st.session_state['car_data'] = None
 
-# Поле ввода
-vin = st.text_input(
-    "Введите VIN код:", 
-    max_chars=17, 
-    help="Нажмите Ctrl+V (или Cmd+V) в любом месте страницы для быстрой вставки"
-).upper().strip()
+# --- КОМПОНЕНТ КНОПКИ ВСТАВКИ (JS) ---
+# Этот скрипт создает HTML-кнопку, которая имеет доступ к буферу браузера
+# и насильно вставляет текст в поле ввода Streamlit.
+paste_component = """
+<div style="display: flex; align-items: flex-end; height: 100%;">
+    <button id="paste-btn" style="
+        background-color: #FF4B4B; 
+        color: white; 
+        border: none; 
+        padding: 0.5rem 1rem; 
+        border-radius: 0.5rem; 
+        cursor: pointer; 
+        font-weight: bold;
+        width: 100%;
+        font-family: 'Source Sans Pro', sans-serif;">
+        📋 Вставить из буфера
+    </button>
+</div>
 
+<script>
+    const btn = document.getElementById('paste-btn');
+    btn.addEventListener('click', async () => {
+        try {
+            // Читаем текст из буфера обмена браузера
+            const text = await navigator.clipboard.readText();
+            
+            // Находим поле ввода Streamlit (обычно это input type="text")
+            const inputFrame = window.parent.document;
+            const inputs = inputFrame.querySelectorAll('input[type="text"]');
+            
+            // Берем первое найденное поле (поле VIN)
+            if (inputs.length > 0) {
+                const input = inputs[0];
+                
+                // Устанавливаем значение
+                // Оставляем только буквы и цифры
+                const cleanText = text.replace(/[^a-zA-Z0-9]/g, '').toUpperCase().substring(0, 17);
+                
+                // Эмулируем ввод пользователя, чтобы React (Streamlit) увидел изменения
+                const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+                nativeInputValueSetter.call(input, cleanText);
+                
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+                input.focus();
+            } else {
+                console.error("Поле ввода не найдено");
+            }
+        } catch (err) {
+            console.error('Ошибка чтения буфера:', err);
+            alert('Пожалуйста, разрешите доступ к буферу обмена или используйте HTTPS.');
+        }
+    });
+</script>
+"""
+
+# Разметка колонок: Поле ввода (широкое) и Кнопка (узкая)
+col1, col2 = st.columns([4, 1], vertical_alignment="bottom")
+
+with col1:
+    vin = st.text_input("Введите VIN код:", max_chars=17, key="vin_field").upper().strip()
+
+with col2:
+    # Вставляем нашу JS-кнопку. Height=42 подгоняет высоту под поле ввода
+    components.html(paste_component, height=42)
+
+# Кнопка запуска поиска
 if st.button("🔍 ПОЛУЧИТЬ ДАННЫЕ", type="primary", use_container_width=True):
     if len(vin) == 17:
         st.session_state['car_data'] = None 
@@ -268,7 +307,6 @@ if st.session_state['car_data']:
     
     st.divider()
 
-    # ХАРАКТЕРИСТИКИ
     col_info1, col_info2, col_info3 = st.columns(3)
     with col_info1:
         st.markdown(f"**📅 Дата выпуска:**\n{data.get('date', '-')}")
@@ -279,7 +317,6 @@ if st.session_state['car_data']:
     
     st.divider()
 
-    # КНОПКИ ПОИСКА
     engine = data.get('engine', '')
     
     if engine and "G4NA" in engine:
