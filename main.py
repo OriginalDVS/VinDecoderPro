@@ -4,21 +4,26 @@ import sys
 import re
 import time
 import os
+import streamlit.components.v1 as components
 
 # --- УСТАНОВКА ЗАВИСИМОСТЕЙ ---
 @st.cache_resource
 def install_system_dependencies():
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright"])
+    packages = ["playwright", "pyperclip"]
+    for package in packages:
+        try:
+            __import__(package)
+        except ImportError:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", package])
     
+    # Установка браузеров для Playwright
     subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"])
     subprocess.run([sys.executable, "-m", "playwright", "install-deps"])
 
 install_system_dependencies()
 
 from playwright.sync_api import sync_playwright
+import pyperclip
 
 # --- ФУНКЦИИ ЛОГИКИ ---
 def extract_code(text):
@@ -204,15 +209,65 @@ def run_search(vin, mode):
             browser.close()
 
 # --- ИНТЕРФЕЙС STREAMLIT ---
-st.set_page_config(page_title="VIN Decoder", page_icon="⚙️")
+st.set_page_config(page_title="VIN Decoder", page_icon="⚙️", layout="wide")
+
+# --- JS СКРИПТ ДЛЯ ГОРЯЧИХ КЛАВИШ (RU/EN) ---
+# Этот скрипт слушает нажатие Ctrl+V (код клавиши KeyV) глобально
+# Если нажато - он находит поле ввода и ставит на него фокус
+hotkey_script = """
+<script>
+const doc = window.parent.document;
+doc.addEventListener('keydown', function(e) {
+    // Проверяем нажатие Ctrl (или Cmd на Mac) + клавиша V (физическая, работает и для 'М' на русс)
+    if ((e.ctrlKey || e.metaKey) && e.code === 'KeyV') {
+        const input = doc.querySelector('input[type="text"]');
+        if (input && input !== doc.activeElement) {
+            input.focus();
+            // Мы не делаем preventDefault, чтобы браузер выполнил вставку
+        }
+    }
+});
+</script>
+"""
+components.html(hotkey_script, height=0, width=0)
 
 st.title("VIN DECODER ULTIMATE")
 
+# Инициализация State
 if 'car_data' not in st.session_state:
     st.session_state['car_data'] = None
+if 'vin_input' not in st.session_state:
+    st.session_state['vin_input'] = ""
 
-vin = st.text_input("Введите VIN код:", max_chars=17).upper().strip()
+# Функция вставки из буфера
+def paste_vin_from_clipboard():
+    try:
+        text = pyperclip.paste()
+        # Очистка: оставляем только буквы и цифры, в верхний регистр
+        clean_text = re.sub(r'[^a-zA-Z0-9]', '', text).upper()
+        if clean_text:
+            st.session_state.vin_input = clean_text[:17]
+        else:
+            st.warning("Буфер обмена пуст или не содержит текста")
+    except Exception as e:
+        st.error(f"Ошибка доступа к буферу обмена: {e}")
 
+# --- БЛОК ВВОДА ---
+# Создаем колонки: широкая для ввода, узкая для кнопки вставки
+col_input, col_paste = st.columns([5, 1], vertical_alignment="bottom")
+
+with col_input:
+    vin = st.text_input(
+        "Введите VIN код:", 
+        max_chars=17, 
+        key="vin_input",
+        help="Поддерживает вставку по Ctrl+V (En/Ru)"
+    ).upper().strip()
+
+with col_paste:
+    st.button("📋 Вставить", on_click=paste_vin_from_clipboard, use_container_width=True)
+
+# Кнопка запуска
 if st.button("🔍 ПОЛУЧИТЬ ДАННЫЕ", type="primary", use_container_width=True):
     if len(vin) == 17:
         st.session_state['car_data'] = None 
@@ -229,20 +284,23 @@ if st.button("🔍 ПОЛУЧИТЬ ДАННЫЕ", type="primary", use_container
 if st.session_state['car_data']:
     data = st.session_state['car_data']
     
-    # 1. Заголовок (Название машины)
+    # 1. Заголовок
     st.header(data.get('car_name', 'Неизвестно'))
     
-    # 2. Код модели (серым, отдельно)
+    # 2. Код модели
     if data.get('model_code'):
         st.caption(f"Код модели: {data['model_code']}")
     
     st.divider()
 
-    # 3. ХАРАКТЕРИСТИКИ В СТОЛБИК (Вертикально)
-    # Используем markdown для красивого и компактного вида
-    st.markdown(f"**📅 Дата выпуска:** {data.get('date', '-')}")
-    st.markdown(f"**⚙️ Привод:** {data.get('drive', '-')}")
-    st.markdown(f"**🚀 Двигатель:** {data.get('engine', '---')}")
+    # 3. ХАРАКТЕРИСТИКИ
+    col_info1, col_info2, col_info3 = st.columns(3)
+    with col_info1:
+        st.markdown(f"**📅 Дата выпуска:**\n{data.get('date', '-')}")
+    with col_info2:
+        st.markdown(f"**⚙️ Привод:**\n{data.get('drive', '-')}")
+    with col_info3:
+        st.markdown(f"**🚀 Двигатель:**\n{data.get('engine', '---')}")
     
     st.divider()
 
