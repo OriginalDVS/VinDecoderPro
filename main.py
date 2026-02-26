@@ -1,290 +1,571 @@
-import streamlit as st
-import subprocess
 import sys
 import re
 import time
+import random
+import urllib.parse
 import os
-import streamlit.components.v1 as components
+import streamlit as st
+import concurrent.futures
 
-# --- УСТАНОВКА ЗАВИСИМОСТЕЙ ---
-@st.cache_resource
-def install_system_dependencies():
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright"])
-    
-    try:
-        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=False)
-        subprocess.run([sys.executable, "-m", "playwright", "install-deps"], check=False)
-    except:
-        pass
-
-install_system_dependencies()
-
+# --- АВТО-УСТАНОВКА БРАУЗЕРОВ ДЛЯ СЕРВЕРА СТРИМЛИТ ---
+os.system("playwright install chromium")
 from playwright.sync_api import sync_playwright
 
-# --- ФУНКЦИИ ЛОГИКИ ---
+# --- КОНФИГУРАЦИЯ ---
+st.set_page_config(page_title="VIN Decoder Ultimate", layout="wide")
+
+PROXY_LIST =[None, None, None, None] # Autodoc, Exist, Armtek, Part-kom
+
+# --- CSS ДЛЯ КАРТОЧЕК ---
+st.markdown("""
+<style>
+.car-card {
+    border: 1px solid #dcdde1; border-radius: 8px; padding: 15px; margin-bottom: 10px; background-color: #ffffff;
+}
+.car-card h3 { color: #2c3e50; text-align: center; margin-top: 0; font-size: 16px; }
+.car-card .car-name { color: #2980b9; font-weight: bold; text-align: center; font-size: 18px; margin-bottom: 5px; }
+.car-card .car-model { color: #7f8c8d; text-align: center; font-size: 14px; font-family: monospace; margin-bottom: 10px; }
+.car-card hr { margin: 10px 0; }
+.car-card .param { font-size: 14px; color: #7f8c8d; }
+.car-card .val { font-size: 14px; color: #2c3e50; font-weight: bold; }
+.engine-box { background-color: #fff0f0; border: 1px solid #ffcccc; border-radius: 5px; padding: 10px; text-align: center; margin-top: 15px; }
+.engine-box .eng-label { font-size: 12px; color: #bdc3c7; font-weight: bold; margin-bottom: 5px; }
+.engine-box .eng-val { font-size: 24px; color: #c0392b; font-weight: bold; font-family: monospace; }
+.part-card { border: 1px solid #eee; border-radius: 8px; padding: 15px; margin-bottom: 10px; background-color: #ffffff;}
+.part-title { font-weight: bold; font-size: 14px; color: #2c3e50; margin-bottom: 8px; }
+.part-code-autodoc { background-color: #e3f2fd; color: #0d47a1; padding: 8px; border-radius: 4px; text-align: center; font-family: monospace; font-size: 18px; font-weight: bold; margin-bottom: 8px;}
+.part-code-elcats { background-color: #e8f5e9; color: #1b5e20; padding: 8px; border-radius: 4px; text-align: center; font-family: monospace; font-size: 18px; font-weight: bold; margin-bottom: 8px;}
+.part-code-armtek { background-color: #fff3e0; color: #e65100; padding: 8px; border-radius: 4px; text-align: center; font-family: monospace; font-size: 18px; font-weight: bold; margin-bottom: 8px;}
+.part-desc { font-size: 12px; color: #7f8c8d; }
+</style>
+""", unsafe_allow_html=True)
+
+
+# =====================================================================
+# === БЭКЕНД ПАРСИНГА (Скрытый режим включен)
+# =====================================================================
+
 def extract_code(text):
     if not text: return None
     match = re.search(r'([A-Z0-9]{5,20})$', text.strip())
     return match.group(1) if match else None
 
-def find_part(page, base_url, path, node_kws, part_kws, code_prefix):
-    try:
-        page.goto(base_url, timeout=60000)
-        page.wait_for_load_state()
-    except: return None
-
-    for step in path:
-        try:
-            page.locator(f"p.catalog-node__name:has-text('{step}')").first.click()
-            time.sleep(0.5)
-        except: return None
-
-    try: page.wait_for_selector('.goods__item, .node-item', timeout=8000)
-    except: return None
-
-    working_page = page
-    needs_close = False
-
-    if page.locator('.goods__item').count() == 0:
-        nodes = page.locator('.node-item').all()
-        target = None
-        for n in nodes:
-            if all(k in n.inner_text().lower() for k in node_kws):
-                target = n; break
-        if not target and 'any' in node_kws and nodes: target = nodes[0]
-
-        if target:
-            with page.context.expect_page() as new_p:
-                target.locator("a:has-text('Показать все')").first.click()
-            working_page = new_p.value
-            working_page.wait_for_load_state()
-            needs_close = True
-        else: return None
-
-    final = None
-    try:
-        working_page.wait_for_selector('.goods__item', timeout=15000)
-        box = working_page.locator('.box-goods')
-        if box.count(): 
-            box.evaluate("el => el.scrollTop = el.scrollHeight")
-            time.sleep(0.5)
-
-        goods = working_page.locator('.goods__item').all()
-        href = None
-        for g in goods:
-            txt = g.inner_text().lower()
-            if part_kws and all(w in txt for w in part_kws):
-                href = g.locator('a.goods__item-link').get_attribute('href'); break
-            if code_prefix and code_prefix in txt:
-                href = g.locator('a.goods__item-link').get_attribute('href'); break
-        
-        if href:
-            working_page.goto("https://www.autodoc.ru" + href, timeout=60000)
-            try:
-                working_page.wait_for_selector('.properties__description-text', timeout=10000)
-                desc = working_page.locator('.properties__description-text').inner_text()
-                final = {'text': desc, 'code': extract_code(desc)}
-            except: pass
-    except: pass
-    finally:
-        if needs_close: working_page.close()
+def create_stealth_browser_and_page(playwright_instance, proxy_url=None):
+    args =['--disable-blink-features=AutomationControlled']
+    launch_options = {'headless': True, 'args': args, 'ignore_default_args': ["--enable-automation"]}
+    if proxy_url: launch_options['proxy'] = {"server": proxy_url}
     
-    return final
-
-def run_search(vin, mode):
-    status_box = st.empty()
-    results = []
+    try: browser = playwright_instance.chromium.launch(channel="chrome", **launch_options)
+    except: browser = playwright_instance.chromium.launch(**launch_options)
     
+    context = browser.new_context(
+        locale="ru-RU", 
+        timezone_id="Europe/Moscow", 
+        viewport={'width': 1920, 'height': 1080},
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+    page = context.new_page()
+    page.add_init_script("delete Object.getPrototypeOf(navigator).webdriver; window.chrome = { runtime: {} };")
+    return browser, page
+
+def get_autodoc_details(vin, proxy_url):
+    data = {'car_name': None, 'model_code': None, 'date': None, 'engine': None, 'drive': None, 'error': False, 'source': 'AUTODOC.RU'}
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
-        )
-        context = browser.new_context(viewport={'width': 1920, 'height': 1080})
-        page = context.new_page()
-        
+        browser, page = create_stealth_browser_and_page(p, proxy_url)
         try:
-            status_box.info("Вход на сайт...")
-            page.goto("https://www.autodoc.ru/", timeout=60000)
+            page.goto("https://www.autodoc.ru/")
             page.get_by_role("searchbox").fill(vin)
             page.locator("button.search-button").click()
+            try:
+                page.wait_for_selector("h1.catalog-originals-heading", timeout=10000)
+                raw_title = page.locator("h1.catalog-originals-heading").inner_text()
+                clean_title = raw_title.replace("Запчасти для", "").strip()
+                parts = clean_title.split()
+                data['car_name'] = " ".join(parts[:-1]) if len(parts) > 1 else clean_title
+            except: 
+                data['error'] = True; return data
+
+            page.locator('tui-icon[title="Параметры автомобиля"]').click()
+            page.wait_for_selector('.dialog-car-attributes__item', timeout=10000)
             
-            if mode == "CHECK":
-                data = {'car_name': 'Неизвестно', 'model_code': '', 'date': '-', 'engine': None, 'drive': '-'}
-                
-                try:
-                    page.wait_for_selector("h1.catalog-originals-heading", timeout=10000)
-                    raw_title = page.locator("h1.catalog-originals-heading").inner_text()
-                    clean_title = raw_title.replace("Запчасти для", "").strip()
-                    parts = clean_title.split()
-                    data['car_name'] = " ".join(parts[:-1]) if len(parts) > 1 else clean_title
+            for item in page.locator('.dialog-car-attributes__item').all():
+                name = item.locator('.dialog-car-attributes__item-name').inner_text()
+                val = item.locator('.dialog-car-attributes__item-value').inner_text().strip()
+                if "Номер двигателя" in name: data['engine'] = val[:4].upper()
+                elif "Дата выпуска" in name: data['date'] = val
+                elif "Модель:" in name or ("Модель" in name and "год" not in name): data['model_code'] = val
+                elif "Опции" in name:
+                    try:
+                        item.scroll_into_view_if_needed()
+                        btn = item.locator('.dialog-car-attributes__item_show-more')
+                        if btn.count() and btn.is_visible(): btn.click(); time.sleep(0.5)
+                    except: pass
+                    opt = item.locator('.dialog-car-attributes__item-value').inner_text().upper()
+                    if "4WD" in opt: data['drive'] = "4WD (Полный)"
+                    elif "2WD" in opt: data['drive'] = "2WD (Передний)"
+        except: data['error'] = True
+        finally: browser.close()
+    return data
+
+def get_exist_details(vin, proxy_url):
+    data = {'car_name': None, 'model_code': None, 'date': None, 'engine': None, 'drive': None, 'error': False, 'source': 'EXIST.RU'}
+    with sync_playwright() as p:
+        browser, page = create_stealth_browser_and_page(p, proxy_url)
+        try:
+            page.goto(f"https://exist.ru/Price/Empty.aspx?q={vin}")
+            page.wait_for_selector('.car-info', timeout=20000)
+            data['car_name'] = page.locator('.car-info__car-name').first.text_content().strip()
+            data['date'] = page.locator('.car-info__car-years').first.text_content().strip()
+            
+            nu = data['car_name'].upper()
+            if "4WD" in nu or "AWD" in nu: data['drive'] = "4WD (Полный)"
+            elif "2WD" in nu: data['drive'] = "2WD (Передний)"
+            
+            m = re.search(r'\(([A-Z0-9]{4,5})\)', data['car_name'])
+            if m: data['engine'] = m.group(1)
+            
+            if not data['drive']:
+                txt = page.locator('.car-info').first.text_content()
+                md = re.search(r'Transaxle:\s*([A-Z0-9\s-]+?)(?:\s*\||$)', txt)
+                if md:
+                    d = md.group(1).strip()
+                    if "2WD" in d: data['drive'] = "2WD (Передний)"
+                    elif "4WD" in d: data['drive'] = "4WD (Полный)"
+                    else: data['drive'] = d
+        except: data['error'] = True
+        finally: browser.close()
+    return data
+
+def get_armtek_details(vin, proxy_url):
+    data = {'car_name': None, 'model_code': None, 'date': None, 'engine': None, 'drive': None, 'error': False, 'source': 'ARMTEK.RU'}
+    with sync_playwright() as p:
+        browser, page = create_stealth_browser_and_page(p, proxy_url)
+        try:
+            page.goto(f"https://armtek.ru/search?text={vin}")
+            time.sleep(3); page.keyboard.press("Escape")
+            page.wait_for_selector("div.car__header", timeout=15000)
+            try:
+                h = page.locator("mat-expansion-panel-header").first
+                if h.is_visible() and "mat-expanded" not in h.get_attribute("class"):
+                    h.click(); time.sleep(1)
+            except: pass
+            
+            for item in page.locator("div.car__main-information-item").all():
+                t = item.locator("p.car__main-information-item-title").text_content().strip()
+                v = item.locator("p.font__body2").text_content().strip()
+                if "Модель" in t and "год" not in t: data['model_code'] = v
+                elif "Дата выпуска" in t: data['date'] = v
+                elif "Номер двигателя" in t: data['engine'] = v[:4].upper()
+                elif "Опции" in t:
+                    if "4WD" in v: data['drive'] = "4WD (Полный)"
+                    elif "2WD" in v: data['drive'] = "2WD (Передний)"
+            
+            tel = page.locator("div.car__header-info-title p").first
+            if tel.is_visible(): data['car_name'] = tel.text_content().strip()
+        except: data['error'] = True
+        finally: browser.close()
+    return data
+
+def get_partkom_details(vin, proxy_url):
+    data = {'car_name': None, 'model_code': None, 'date': None, 'engine': None, 'drive': None, 'error': False, 'source': 'PART-KOM.RU'}
+    with sync_playwright() as p:
+        browser, page = create_stealth_browser_and_page(p, proxy_url)
+        try:
+            page.goto(f"https://part-kom.ru/catalog-vin?vin={vin}")
+            iframe_obj = None
+            found = False
+            for _ in range(150):
+                try: page.evaluate("() => { document.querySelectorAll('button').forEach(b => { if(b.innerText.includes('Да, верно') || b.ariaLabel=='закрыть') b.click(); }) }")
                 except: pass
+                
+                if not iframe_obj:
+                     el = page.locator('iframe[src*="b2b.part-kom.ru"]').first
+                     if el.count(): iframe_obj = el.content_frame
 
-                try:
-                    page.locator('tui-icon[title="Параметры автомобиля"]').click()
-                    page.wait_for_selector('.dialog-car-attributes__item', timeout=15000)
-                    items = page.locator('.dialog-car-attributes__item').all()
+                if iframe_obj:
+                    try:
+                        b_exp = iframe_obj.locator("button:has-text('Все параметры')").first
+                        if b_exp.is_visible(): b_exp.click(); time.sleep(0.5)
 
-                    for item in items:
-                        name = item.locator('.dialog-car-attributes__item-name').inner_text()
-                        val = item.locator('.dialog-car-attributes__item-value').inner_text().strip()
+                        params = iframe_obj.locator('div[class*="grouped-cars-list-group__parameter"], li[class*="cars-list-item-mobile__parameter"]').all()
+                        if params:
+                            tel = iframe_obj.locator('div[class*="grouped-cars-list-group__title"], div[class*="cars-list-item-mobile__brand"]').first
+                            if tel.count(): data['car_name'] = tel.text_content().strip()
 
-                        if "Номер двигателя" in name:
-                            if len(val) > 3: data['engine'] = val[:4].upper()
-                        elif "Дата выпуска" in name:
-                            data['date'] = val
-                        elif "Модель:" in name or ("Модель" in name and "год" not in name):
-                            data['model_code'] = val
-                        elif "Опции" in name:
-                            try:
-                                item.scroll_into_view_if_needed()
-                                show_more = item.locator('.dialog-car-attributes__item_show-more')
-                                if show_more.count() > 0 and show_more.is_visible():
-                                    show_more.click()
-                                    time.sleep(0.5)
-                            except: pass
-                            
-                            opt_text = item.locator('.dialog-car-attributes__item-value').inner_text().upper()
-                            if "4WD" in opt_text: data['drive'] = "4WD (Полный)"
-                            elif "2WD" in opt_text: data['drive'] = "2WD (Передний)"
-                except:
-                    return "NOT_FOUND"
+                            for p_item in params:
+                                divs = p_item.locator("div").all()
+                                if len(divs) >= 2:
+                                    k, v = divs[0].text_content().strip(), divs[1].text_content().strip()
+                                    if "Год" in k: data['date'] = v
+                                    elif "Код двигателя" in k: data['engine'] = v[:4].upper() if len(v)>4 else v
+                                    elif "Transaxle" in k:
+                                        if "4WD" in v: data['drive'] = "4WD (Полный)"
+                                        elif "2WD" in v: data['drive'] = "2WD (Передний)"
+                            found = True; break
+                    except: pass
+                time.sleep(0.1)
+            if not found: data['error'] = True
+        except: data['error'] = True
+        finally: browser.close()
+    return data
 
-                status_box.empty()
-                return data
-
-            status_box.info(f"Заход в каталог двигателя...")
-            try:
-                page.locator('tui-icon[title="Параметры автомобиля"]').click()
-                page.wait_for_selector('.dialog-car-attributes__item')
+# === ЗАПЧАСТИ ===
+def run_autodoc_part(vin, node_path, node_kws, part_kws, code_prefix, title):
+    time.sleep(random.uniform(0.1, 0.5))
+    items =[]
+    with sync_playwright() as p:
+        browser, page = create_stealth_browser_and_page(p, PROXY_LIST[0])
+        try:
+            page.goto("https://www.autodoc.ru/")
+            page.get_by_role("searchbox").fill(vin)
+            page.locator("button.search-button").click()
+            try: page.locator('tui-icon[title="Параметры автомобиля"]').click(); page.wait_for_selector('.dialog-car-attributes__item', timeout=5000)
             except: pass
-
             page.reload(); page.wait_for_load_state()
-            try:
-                page.locator("p.catalog-node__name:has-text('Двигатель')").first.click()
-                time.sleep(1)
+            try: page.locator("p.catalog-node__name:has-text('Двигатель')").first.click(); time.sleep(1)
             except: pass
-            base_url = page.url
+            
+            # find_part logic inline
+            for step in node_path:
+                try: page.locator(f"p.catalog-node__name:has-text('{step}')").first.click(); time.sleep(0.5)
+                except: break
+            try: page.wait_for_selector('.goods__item, .node-item', timeout=5000)
+            except: pass
+            
+            working_page = page
+            if page.locator('.goods__item').count() == 0:
+                nodes = page.locator('.node-item').all()
+                target = next((n for n in nodes if all(k in n.inner_text().lower() for k in node_kws)), None)
+                if not target and 'any' in node_kws and nodes: target = nodes[0]
+                if target:
+                    with page.context.expect_page() as new_p: target.locator("a:has-text('Показать все')").first.click()
+                    working_page = new_p.value
+                    working_page.wait_for_load_state()
+            
+            try:
+                working_page.wait_for_selector('.goods__item', timeout=8000)
+                if working_page.locator('.box-goods').count(): working_page.evaluate("el => el.scrollTop = el.scrollHeight"); time.sleep(0.5)
+                for g in working_page.locator('.goods__item').all():
+                    txt = g.inner_text().lower()
+                    if (part_kws and all(w in txt for w in part_kws)) or (code_prefix and code_prefix in txt):
+                        href = g.locator('a.goods__item-link').get_attribute('href')
+                        working_page.goto("https://www.autodoc.ru" + href)
+                        working_page.wait_for_selector('.properties__description-text', timeout=5000)
+                        desc = working_page.locator('.properties__description-text').inner_text()
+                        m = re.search(r'([A-Z0-9]{5,20})$', desc.strip())
+                        code = m.group(1) if m else None
+                        items.append({'source': 'AUTODOC', 'title': title, 'desc': desc, 'code': code})
+                        break
+            except: pass
+        except: pass
+        finally: browser.close()
+    if not items: items.append({'source': 'AUTODOC', 'title': title, 'desc': 'Не найдено', 'code': None})
+    return items
 
-            if mode == "G4NA":
-                res1 = find_part(page, base_url, ["Механизм газораспределения", "Распредвал", "Шестерня распредвала"], ['any'], ['распредвал', 'впуск'], None)
-                results.append(("Распредвал Впуск", res1))
-                res2 = find_part(page, base_url, ["Механизм газораспределения", "Распредвал", "Шестерня распредвала"], ['any'], ['распредвал', 'выпуск'], None)
-                results.append(("Распредвал Выпуск", res2))
-            elif mode == "G4KE":
-                res1 = find_part(page, base_url, ["Блок-картер", "Блок-картер"], ["крышка", "ременного"], None, "21350")
-                results.append(("Лобная крышка", res1))
-                res2 = find_part(page, base_url, ["Крепление двигателя", "Кронштейн двигателя"], ["подвеска", "двигателя"], None, "21670")
-                results.append(("Кронштейн", res2))
+def run_elcats_part(vin, mode, title):
+    time.sleep(random.uniform(0.3, 0.8))
+    items =[]
+    if mode == 'G4NA_intake': group_kw = 'РАСПРЕДЕЛИТЕЛЬНЫЙ ВАЛ И КЛАПАН'; node_descr = 'РАСПРЕДВАЛ В СБОРЕ-ВПУСКНОЙ'
+    elif mode == 'G4NA_exhaust': group_kw = 'РАСПРЕДЕЛИТЕЛЬНЫЙ ВАЛ И КЛАПАН'; node_descr = 'РАСПРЕДЕЛИТЕЛЬНЫЙ ВАЛ В СБОРЕ-ВЫХЛОПНОЙ'
+    elif mode == 'G4KE_cover': group_kw = 'КРЫШКА РЕМНЯ И МАСЛЯНЫЙ ПОДДОН'; node_descr = 'КРЫШКА В СБОРЕ-ПРИВОДНАЯ ЦЕПЬ'
+    elif mode == 'G4KE_bracket': group_kw = 'КРЕПЛЕНИЯ ДВИГАТЕЛЯ И ТРАНСМИССИИ'; node_descr = 'КРОНШТЕЙН В СБОРЕ-ОПОРА ДВИГАТЕЛЯ'
+    else: return[]
 
-            status_box.empty()
-            return results
-        finally:
-            browser.close()
+    with sync_playwright() as p:
+        browser, page = create_stealth_browser_and_page(p, PROXY_LIST[1])
+        try:
+            page.goto(f"https://www.elcats.ru/hyundai/default.aspx?carvin={vin}", timeout=60000, referer="https://www.exist.ru/", wait_until="domcontentloaded")
+            time.sleep(2)
+            if "default.aspx" in page.url.lower():
+                try: page.locator('#ctl00_cphMasterPage_txbVIN').fill(vin)
+                except: page.locator('input[type=text]').first.fill(vin)
+                time.sleep(0.3)
+                page.locator('#ctl00_cphMasterPage_btnFindByVIN').click()
+                time.sleep(3)
 
-# --- ИНТЕРФЕЙС ---
-st.set_page_config(page_title="VIN Decoder", page_icon="⚙️", layout="wide")
+            m = re.search(r'Model=([a-f0-9\-]{36})', page.url, re.I)
+            if m:
+                model_uuid = m.group(1)
+                group_id = page.evaluate("""(hint) => {
+                        var links = document.querySelectorAll('a[href^="javascript:submit"]');
+                        for (var i = 0; i < links.length; i++) {
+                            if (links[i].textContent.toUpperCase().indexOf(hint.toUpperCase()) !== -1) {
+                                var match = links[i].getAttribute('href').match(/submit[(]'([^']+)'/);
+                                if (match) return match[1];
+                            }
+                        } return null;
+                    }""", group_kw)
 
-# Компонент для вставки из буфера (JS)
-paste_component = """
-<div style="display: flex; align-items: flex-end; height: 100%;">
-    <button id="paste-btn" style="
-        background-color: #FF4B4B; color: white; border: none; padding: 0.5rem 1rem; 
-        border-radius: 0.5rem; cursor: pointer; font-weight: bold; width: 100%; height: 42px;">
-        📋 Вставить VIN
-    </button>
-</div>
-<script>
-    const btn = document.getElementById('paste-btn');
-    btn.addEventListener('click', async () => {
-        try {
-            const text = await navigator.clipboard.readText();
-            const inputFrame = window.parent.document;
-            const inputs = inputFrame.querySelectorAll('input[type="text"]');
-            if (inputs.length > 0) {
-                const input = inputs[0];
-                const cleanText = text.replace(/[^a-zA-Z0-9]/g, '').toUpperCase().substring(0, 17);
-                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-                setter.call(input, cleanText);
-                input.dispatchEvent(new Event('input', { bubbles: true }));
-                input.dispatchEvent(new Event('change', { bubbles: true }));
-                input.focus();
-            }
-        } catch (err) { alert('Разрешите доступ к буферу обмена.'); }
-    });
-</script>
-"""
+                if group_id:
+                    page.goto(f"https://www.elcats.ru/hyundai/Unit.aspx?GroupId={group_id}&Model={model_uuid}&Title={urllib.parse.quote(group_kw)}", wait_until="domcontentloaded")
+                    time.sleep(2)
+                    cnode_ids = page.evaluate(f"""(descr) => {{
+                        var nodes = document.querySelectorAll('div.CNode');
+                        var res =[];
+                        nodes.forEach(n => {{
+                            var s = n.querySelector('span.descr-ru');
+                            if(s && s.textContent.toUpperCase().indexOf(descr.toUpperCase()) !== -1) res.push(n.getAttribute('id'));
+                        }}); return res;
+                    }}""", node_descr)
 
-st.title("VIN DECODER ULTIMATE")
+                    seen = set()
+                    for cid in cnode_ids:
+                        try:
+                            page.locator(f"xpath=//div[@id='{cid}']").click()
+                            time.sleep(4)
+                            parts = page.evaluate("""() => {
+                                var res =[];
+                                document.querySelectorAll('table.OpelParts tr').forEach((row, i) => {
+                                    if(i===0) return;
+                                    var tds = row.querySelectorAll('td');
+                                    if(tds.length < 2) return;
+                                    var a = tds[0].querySelector('a');
+                                    var code = (a ? a.textContent : tds[0].textContent).replace(/\\s+/g, ' ').trim();
+                                    var span = tds[1].querySelector('span.descr-ru');
+                                    var descr = (span ? span.textContent : tds[1].textContent).replace(/\\s+/g, ' ').trim();
+                                    var period = tds.length > 3 ? tds[3].textContent.replace(/\\s+/g, ' ').trim() : "";
+                                    var info = tds.length > 4 ? tds[4].textContent.replace(/\\s+/g, ' ').trim() : "";
+                                    if(code.length > 3) res.push({code: code, descr: descr, period: period, info: info});
+                                }); return res;
+                            }""")
+                            for pt in parts:
+                                if pt['code'] not in seen:
+                                    seen.add(pt['code'])
+                                    fdesc = pt['descr']
+                                    if pt['period']: fdesc += f" [{pt['period']}]"
+                                    if pt['info']: fdesc += f" ({pt['info']})"
+                                    items.append({'source': 'ELCATS', 'title': title, 'desc': fdesc, 'code': pt['code']})
+                        except: pass
+        except: pass
+        finally: browser.close()
+    if not items: items.append({'source': 'ELCATS', 'title': title, 'desc': 'Артикулы не найдены', 'code': None})
+    return items
 
-if 'car_data' not in st.session_state:
-    st.session_state['car_data'] = None
+def run_armtek_part(vin, mode, title):
+    time.sleep(random.uniform(0.5, 1.2))
+    items =[]
+    CFG = {
+        'G4NA_intake':  {'q': 'распредвал впускной', 'kw': 'впускной', 'ignore':[]},
+        'G4NA_exhaust': {'q': 'распредвал выпускной', 'kw': 'выпускной', 'ignore':[]},
+        'G4KE_cover':   {'q': 'КОЖУХ В СБОРЕ-ЦЕПЬ ГРМ', 'kw': 'кожух', 'ignore':[]},
+        'G4KE_bracket': {'q': 'кронштейн двигателя', 'kw': 'кронштейн', 'ignore':['двигатель уст', 'опора']},
+    }
+    conf = CFG.get(mode)
+    if not conf: return[]
 
-col1, col2 = st.columns([4, 1.2], vertical_alignment="bottom")
-with col1:
-    vin = st.text_input("Введите VIN код (17 знаков):", max_chars=17, key="vin_field").upper().strip()
-with col2:
-    components.html(paste_component, height=50)
+    with sync_playwright() as p:
+        browser, page = create_stealth_browser_and_page(p, PROXY_LIST[2])
+        try:
+            page.goto(f"https://armtek.ru/search?text={vin}", wait_until="domcontentloaded")
+            page.wait_for_selector("div.car__header", timeout=20000)
+            try: page.keyboard.press("Escape")
+            except: pass
+            
+            inp = page.locator('input[placeholder="Наименование запчасти"]').first
+            inp.wait_for(state="visible", timeout=15000)
+            inp.click(click_count=3)
+            page.keyboard.press("Backspace")
+            time.sleep(0.5)
+            
+            try: inp.press_sequentially(conf['q'], delay=30)
+            except: inp.type(conf['q'], delay=30)
+            time.sleep(0.5)
+            page.keyboard.press("Enter")
+            
+            time.sleep(2)
+            page.wait_for_selector("div.part", timeout=10000)
 
-if st.button("🔍 ПОЛУЧИТЬ ДАННЫЕ", type="primary", use_container_width=True):
-    if len(vin) == 17:
-        st.session_state['car_data'] = None 
-        with st.spinner('Сбор информации...'):
-            res = run_search(vin, "CHECK")
-            if res == "NOT_FOUND":
-                st.error("Автомобиль не найден")
-            else:
-                st.session_state['car_data'] = res
-    else:
-        st.warning("VIN должен быть 17 символов")
+            parts = page.evaluate(f"""(kw) => {{
+                var res =[]; var seen = {{}};
+                document.querySelectorAll('div.part').forEach(p => {{
+                    var nm = p.querySelector('div.title-name');
+                    var oem = p.querySelector('div.oem');
+                    if (!nm || !oem) return;
+                    var name = nm.textContent.trim(); var code = oem.textContent.trim();
+                    if (code.length < 4 || seen[code]) return;
+                    seen[code] = true;
+                    res.push({{name: name, code: code, match: name.toLowerCase().includes(kw.toLowerCase())}});
+                }}); return res;
+            }}""", conf['kw'])
 
-if st.session_state['car_data']:
-    data = st.session_state['car_data']
-    st.header(data.get('car_name', 'Неизвестно'))
-    
-    # ВЫДЕЛЕННЫЙ ДВИГАТЕЛЬ (КРУПНО)
-    engine_name = data.get('engine', '---')
-    st.markdown(f"""
-        <div style="background-color: #0e1117; padding: 20px; border-radius: 10px; border: 2px solid #FF4B4B; text-align: center; margin: 10px 0;">
-            <p style="margin: 0; color: #808495; font-size: 16px; text-transform: uppercase; letter-spacing: 1px;">Модель двигателя</p>
-            <h1 style="margin: 0; color: #FF4B4B; font-size: 64px; font-weight: 900;">{engine_name}</h1>
+            for pt in parts:
+                if any(ign.lower() in pt['name'].lower() for ign in conf['ignore']): continue
+                if pt['match']:
+                    items.append({'source': 'ARMTEK', 'title': title, 'desc': pt['name'], 'code': pt['code']})
+            
+            if not items and parts: 
+                 for pt in parts:
+                     if any(ign.lower() in pt['name'].lower() for ign in conf['ignore']): continue
+                     items.append({'source': 'ARMTEK', 'title': title, 'desc': pt['name'], 'code': pt['code']})
+                     break
+        except: pass
+        finally: browser.close()
+    if not items: items.append({'source': 'ARMTEK', 'title': title, 'desc': 'Не найдено', 'code': None})
+    return items
+
+
+# =====================================================================
+# === STREAMLIT APP ===
+# =====================================================================
+
+st.title("VIN DECODER PRO 🌐")
+
+vin = st.text_input("Введите VIN код:", max_chars=17).upper().strip()
+
+# Хранение состояния
+if 'car_info' not in st.session_state:
+    st.session_state.car_info =[]
+if 'parts_info' not in st.session_state:
+    st.session_state.parts_info =[]
+if 'engine_type' not in st.session_state:
+    st.session_state.engine_type = None
+
+# Функция для генерации HTML карточки автомобиля
+def generate_car_html(title, data, bg_color, fg_color):
+    if not data or data.get('error'):
+        return f"""
+        <div class="car-card">
+            <h3>{title}</h3>
+            <div class="car-name" style="color: #e74c3c;">НЕ НАЙДЕНО</div>
+            <div class="engine-box" style="background-color: #fdf5f6; border-color: #fab1a0;">
+                <div class="eng-label">МОДЕЛЬ ДВИГАТЕЛЯ</div>
+                <div class="eng-val" style="color: #e74c3c;">---</div>
+            </div>
         </div>
-    """, unsafe_allow_html=True)
+        """
+        
+    return f"""
+    <div class="car-card">
+        <h3>{title}</h3>
+        <div class="car-name" style="color: {fg_color};">{data.get('car_name', 'Неизвестно')}</div>
+        <div class="car-model">{data.get('model_code', '')}</div>
+        <hr>
+        <span class="param">Дата:</span> <span class="val">{data.get('date', '-')}</span><br>
+        <span class="param">Привод:</span> <span class="val">{data.get('drive', '-')}</span>
+        <div class="engine-box">
+            <div class="eng-label">МОДЕЛЬ ДВИГАТЕЛЯ</div>
+            <div class="eng-val">{data.get('engine', 'НЕТ ДАННЫХ')}</div>
+        </div>
+    </div>
+    """
 
-    col_info1, col_info2, col_info3 = st.columns(3)
-    with col_info1:
-        st.markdown(f"**📅 Дата выпуска:** {data.get('date', '-')}")
-    with col_info2:
-        st.markdown(f"**⚙️ Привод:** {data.get('drive', '-')}")
-    with col_info3:
-        st.caption(f"Код модели: {data.get('model_code', '-')}")
+# Функция для генерации HTML карточки запчасти
+def generate_part_html(item):
+    source = item['source']
+    if source == 'AUTODOC': code_class = 'part-code-autodoc'
+    elif source == 'ELCATS': code_class = 'part-code-elcats'
+    else: code_class = 'part-code-armtek'
     
-    st.divider()
+    if item['code']:
+        return f"""
+        <div class="part-card">
+            <div class="part-title">{item['title']}</div>
+            <div class="{code_class}">{item['code']}</div>
+            <div class="part-desc">{item['desc']}</div>
+        </div>
+        """
+    else:
+        return f"""
+        <div class="part-card">
+            <div class="part-title">{item['title']}</div>
+            <div class="part-desc" style="color:red; font-style:italic;">{item['desc']}</div>
+        </div>
+        """
 
-    engine = data.get('engine', '')
-    if engine and "G4NA" in engine:
-        if st.button("🔧 НАЙТИ РАСПРЕДВАЛЫ (G4NA)", type="primary", use_container_width=True):
-            with st.spinner('Ищу в каталогах...'):
-                parts = run_search(vin, "G4NA")
-                for title, item in parts:
-                    with st.expander(title, expanded=True):
-                        if item:
-                            st.write(item['text'])
-                            st.code(item['code'], language="text")
-                        else: st.error("Не найдено")
+if st.button("🔍 ИСКАТЬ АВТО", type="primary"):
+    if len(vin) != 17:
+        st.warning("VIN должен состоять из 17 символов.")
+    else:
+        st.session_state.car_info = []
+        st.session_state.parts_info =[]
+        st.session_state.engine_type = None
 
-    elif engine and "G4KE" in engine:
-        if st.button("🛠️ НАЙТИ КРЕПЛЕНИЕ (G4KE)", type="primary", use_container_width=True):
-            with st.spinner('Ищу в каталогах...'):
-                parts = run_search(vin, "G4KE")
-                for title, item in parts:
-                    with st.expander(title, expanded=True):
-                        if item:
-                            st.write(item['text'])
-                            st.code(item['code'], language="text")
-                        else: st.error("Не найдено")
-    elif engine:
-        st.info("Автопоиск запчастей для этой модели не настроен.")
+        with st.spinner("Ищем информацию об автомобиле на 4 сайтах..."):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                f1 = executor.submit(get_autodoc_details, vin, PROXY_LIST[0])
+                f2 = executor.submit(get_exist_details, vin, PROXY_LIST[1])
+                f3 = executor.submit(get_armtek_details, vin, None, PROXY_LIST[2])
+                f4 = executor.submit(get_partkom_details, vin, None, PROXY_LIST[3])
+                
+                res_auto = f1.result()
+                res_exist = f2.result()
+                res_armtek = f3.result()
+                res_partkom = f4.result()
+
+            st.session_state.car_info =[
+                ("AUTODOC.RU", res_auto, "#EBF5FB", "#2980B9"),
+                ("EXIST.RU", res_exist, "#E9F7EF", "#27AE60"),
+                ("ARMTEK.RU", res_armtek, "#FEF5E7", "#D35400"),
+                ("PART-KOM.RU", res_partkom, "#F4ECF7", "#8E44AD")
+            ]
+
+            # Ищем двигатель для авто-поиска запчастей
+            engines =[
+                res_auto.get('engine', ''), res_exist.get('engine', ''), 
+                res_armtek.get('engine', ''), res_partkom.get('engine', '')
+            ]
+            
+            target_eng = next((e for e in engines if e and ("G4NA" in e or "G4KE" in e)), None)
+            
+            if target_eng:
+                if "G4NA" in target_eng: st.session_state.engine_type = "G4NA"
+                elif "G4KE" in target_eng: st.session_state.engine_type = "G4KE"
+            
+            st.rerun()
+
+# ОТОБРАЖЕНИЕ РЕЗУЛЬТАТОВ АВТО
+if st.session_state.car_info:
+    st.markdown("### 🚘 Данные автомобиля")
+    cols = st.columns(4)
+    for i, (title, data, bg, fg) in enumerate(st.session_state.car_info):
+        with cols[i]:
+            st.markdown(generate_car_html(title, data, bg, fg), unsafe_allow_html=True)
+
+# ПОИСК И ОТОБРАЖЕНИЕ ЗАПЧАСТЕЙ
+if st.session_state.engine_type:
+    eng = st.session_state.engine_type
+    
+    # Кнопка для старта (или автостарт если пусто)
+    if not st.session_state.parts_info:
+        st.info(f"Обнаружен двигатель {eng}. Запускаем параллельный поиск запчастей...")
+        with st.spinner(f"Ищем распредвалы / крепления для {eng}... (Это займет около 20-30 секунд)"):
+            
+            with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+                futures =[]
+                if eng == "G4NA":
+                    futures.append(executor.submit(run_autodoc_part, vin,["Механизм газораспределения", "Распредвал", "Шестерня распредвала"], ['any'],['распредвал', 'впуск'], None, "Распредвал Впуск"))
+                    futures.append(executor.submit(run_autodoc_part, vin,["Механизм газораспределения", "Распредвал", "Шестерня распредвала"],['any'],['распредвал', 'выпуск'], None, "Распредвал Выпуск"))
+                    futures.append(executor.submit(run_elcats_part, vin, "G4NA_intake", "Распредвал Впуск"))
+                    futures.append(executor.submit(run_elcats_part, vin, "G4NA_exhaust", "Распредвал Выпуск"))
+                    futures.append(executor.submit(run_armtek_part, vin, "G4NA_intake", "Распредвал Впуск"))
+                    futures.append(executor.submit(run_armtek_part, vin, "G4NA_exhaust", "Распредвал Выпуск"))
+                elif eng == "G4KE":
+                    futures.append(executor.submit(run_autodoc_part, vin,["Блок-картер", "Блок-картер"],["крышка", "ременного"], None, "21350", "Лобная крышка"))
+                    futures.append(executor.submit(run_autodoc_part, vin,["Крепление двигателя", "Кронштейн двигателя"],["подвеска", "двигателя"], None, "21670", "Кронштейн"))
+                    futures.append(executor.submit(run_elcats_part, vin, "G4KE_cover", "Лобная крышка"))
+                    futures.append(executor.submit(run_elcats_part, vin, "G4KE_bracket", "Кронштейн"))
+                    futures.append(executor.submit(run_armtek_part, vin, "G4KE_cover", "Лобная крышка"))
+                    futures.append(executor.submit(run_armtek_part, vin, "G4KE_bracket", "Кронштейн"))
+
+                # Собираем результаты (flatten lists)
+                for f in concurrent.futures.as_completed(futures):
+                    st.session_state.parts_info.extend(f.result())
+            
+            st.rerun()
+
+    if st.session_state.parts_info:
+        st.markdown("### 🔧 Найденные запчасти")
+        p_cols = st.columns(3)
+        
+        with p_cols[0]:
+            st.markdown("<h4 style='text-align:center; color:#0d47a1;'>AUTODOC</h4>", unsafe_allow_html=True)
+            for p in st.session_state.parts_info:
+                if p['source'] == 'AUTODOC': st.markdown(generate_part_html(p), unsafe_allow_html=True)
+        with p_cols[1]:
+            st.markdown("<h4 style='text-align:center; color:#1b5e20;'>ELCATS</h4>", unsafe_allow_html=True)
+            for p in st.session_state.parts_info:
+                if p['source'] == 'ELCATS': st.markdown(generate_part_html(p), unsafe_allow_html=True)
+        with p_cols[2]:
+            st.markdown("<h4 style='text-align:center; color:#e65100;'>ARMTEK</h4>", unsafe_allow_html=True)
+            for p in st.session_state.parts_info:
+                if p['source'] == 'ARMTEK': st.markdown(generate_part_html(p), unsafe_allow_html=True)
