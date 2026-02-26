@@ -1,66 +1,63 @@
 import sys
+import threading
 import re
 import time
+import os
 import random
 import urllib.parse
-import os
-import streamlit as st
 import concurrent.futures
+import streamlit as st
 
-# --- АВТО-УСТАНОВКА БРАУЗЕРОВ ДЛЯ СЕРВЕРА СТРИМЛИТ ---
-os.system("playwright install chromium")
+# === АВТОМАТИЧЕСКАЯ УСТАНОВКА БРАУЗЕРОВ ДЛЯ СЕРВЕРА ===
+@st.cache_resource
+def install_browsers():
+    os.system("playwright install chromium")
+install_browsers()
+
 from playwright.sync_api import sync_playwright
 
 # --- КОНФИГУРАЦИЯ ---
 st.set_page_config(page_title="VIN Decoder Ultimate", layout="wide")
 
-PROXY_LIST =[None, None, None, None] # Autodoc, Exist, Armtek, Part-kom
+# ПРОКСИ (4 слота: Autodoc, Exist/Elcats, Armtek, Part-kom)
+PROXY_LIST = [None, None, None, None]
 
-# --- CSS ДЛЯ КАРТОЧЕК ---
+# --- CSS СТИЛИ ДЛЯ КАРТОЧЕК ---
 st.markdown("""
 <style>
-.car-card {
-    border: 1px solid #dcdde1; border-radius: 8px; padding: 15px; margin-bottom: 10px; background-color: #ffffff;
-}
-.car-card h3 { color: #2c3e50; text-align: center; margin-top: 0; font-size: 16px; }
-.car-card .car-name { color: #2980b9; font-weight: bold; text-align: center; font-size: 18px; margin-bottom: 5px; }
-.car-card .car-model { color: #7f8c8d; text-align: center; font-size: 14px; font-family: monospace; margin-bottom: 10px; }
-.car-card hr { margin: 10px 0; }
-.car-card .param { font-size: 14px; color: #7f8c8d; }
-.car-card .val { font-size: 14px; color: #2c3e50; font-weight: bold; }
-.engine-box { background-color: #fff0f0; border: 1px solid #ffcccc; border-radius: 5px; padding: 10px; text-align: center; margin-top: 15px; }
-.engine-box .eng-label { font-size: 12px; color: #bdc3c7; font-weight: bold; margin-bottom: 5px; }
-.engine-box .eng-val { font-size: 24px; color: #c0392b; font-weight: bold; font-family: monospace; }
-.part-card { border: 1px solid #eee; border-radius: 8px; padding: 15px; margin-bottom: 10px; background-color: #ffffff;}
-.part-title { font-weight: bold; font-size: 14px; color: #2c3e50; margin-bottom: 8px; }
-.part-code-autodoc { background-color: #e3f2fd; color: #0d47a1; padding: 8px; border-radius: 4px; text-align: center; font-family: monospace; font-size: 18px; font-weight: bold; margin-bottom: 8px;}
-.part-code-elcats { background-color: #e8f5e9; color: #1b5e20; padding: 8px; border-radius: 4px; text-align: center; font-family: monospace; font-size: 18px; font-weight: bold; margin-bottom: 8px;}
-.part-code-armtek { background-color: #fff3e0; color: #e65100; padding: 8px; border-radius: 4px; text-align: center; font-family: monospace; font-size: 18px; font-weight: bold; margin-bottom: 8px;}
-.part-desc { font-size: 12px; color: #7f8c8d; }
+.car-card { border: 1px solid #dcdde1; border-radius: 8px; padding: 15px; background-color: #ffffff; height: 100%; box-shadow: 0 4px 6px rgba(0,0,0,0.05);}
+.car-title { text-align: center; font-weight: 900; font-size: 16px; margin-bottom: 15px; padding: 5px; border-radius: 4px; }
+.car-name { font-weight: bold; text-align: center; font-size: 18px; margin-bottom: 5px; }
+.car-model { color: #7f8c8d; text-align: center; font-size: 14px; font-family: monospace; margin-bottom: 10px; }
+.car-param { font-size: 14px; color: #7f8c8d; }
+.car-val { font-size: 14px; color: #2c3e50; font-weight: bold; }
+.engine-box { border: 2px solid; border-radius: 5px; padding: 10px; text-align: center; margin-top: 15px; }
+.eng-label { font-size: 11px; font-weight: bold; margin-bottom: 3px; }
+.eng-val { font-size: 24px; font-weight: bold; font-family: monospace; }
+.part-card { border: 1px solid; border-radius: 8px; padding: 15px; margin-bottom: 10px; background-color: #ffffff;}
+.part-title { font-weight: bold; font-size: 14px; color: #2c3e50; margin-bottom: 10px; }
+.part-code { padding: 8px; border-radius: 4px; text-align: center; font-family: monospace; font-size: 18px; font-weight: bold; margin-bottom: 8px;}
+.part-desc { font-size: 12px; color: #7f8c8d; line-height: 1.4;}
 </style>
 """, unsafe_allow_html=True)
 
-
 # =====================================================================
-# === БЭКЕНД ПАРСИНГА (Скрытый режим включен)
+# === ДВИЖОК БРАУЗЕРА (СТРОГО HEADLESS ДЛЯ СЕРВЕРА) ===
 # =====================================================================
-
-def extract_code(text):
-    if not text: return None
-    match = re.search(r'([A-Z0-9]{5,20})$', text.strip())
-    return match.group(1) if match else None
-
 def create_stealth_browser_and_page(playwright_instance, proxy_url=None):
     args =['--disable-blink-features=AutomationControlled']
-    launch_options = {'headless': True, 'args': args, 'ignore_default_args': ["--enable-automation"]}
+    launch_options = {
+        'headless': True, # СТРОГО TRUE ДЛЯ РАБОТЫ ОНЛАЙН НА СЕРВЕРЕ!
+        'args': args,
+        'ignore_default_args': ["--enable-automation"]
+    }
     if proxy_url: launch_options['proxy'] = {"server": proxy_url}
     
     try: browser = playwright_instance.chromium.launch(channel="chrome", **launch_options)
     except: browser = playwright_instance.chromium.launch(**launch_options)
     
     context = browser.new_context(
-        locale="ru-RU", 
-        timezone_id="Europe/Moscow", 
+        locale="ru-RU", timezone_id="Europe/Moscow", 
         viewport={'width': 1920, 'height': 1080},
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     )
@@ -68,8 +65,11 @@ def create_stealth_browser_and_page(playwright_instance, proxy_url=None):
     page.add_init_script("delete Object.getPrototypeOf(navigator).webdriver; window.chrome = { runtime: {} };")
     return browser, page
 
+# =====================================================================
+# === 1. ПАРСЕРЫ АВТОМОБИЛЕЙ ===
+# =====================================================================
 def get_autodoc_details(vin, proxy_url):
-    data = {'car_name': None, 'model_code': None, 'date': None, 'engine': None, 'drive': None, 'error': False, 'source': 'AUTODOC.RU'}
+    data = {'car_name': None, 'model_code': None, 'date': None, 'engine': None, 'drive': None, 'error': False}
     with sync_playwright() as p:
         browser, page = create_stealth_browser_and_page(p, proxy_url)
         try:
@@ -108,7 +108,7 @@ def get_autodoc_details(vin, proxy_url):
     return data
 
 def get_exist_details(vin, proxy_url):
-    data = {'car_name': None, 'model_code': None, 'date': None, 'engine': None, 'drive': None, 'error': False, 'source': 'EXIST.RU'}
+    data = {'car_name': None, 'model_code': None, 'date': None, 'engine': None, 'drive': None, 'error': False}
     with sync_playwright() as p:
         browser, page = create_stealth_browser_and_page(p, proxy_url)
         try:
@@ -137,7 +137,7 @@ def get_exist_details(vin, proxy_url):
     return data
 
 def get_armtek_details(vin, proxy_url):
-    data = {'car_name': None, 'model_code': None, 'date': None, 'engine': None, 'drive': None, 'error': False, 'source': 'ARMTEK.RU'}
+    data = {'car_name': None, 'model_code': None, 'date': None, 'engine': None, 'drive': None, 'error': False}
     with sync_playwright() as p:
         browser, page = create_stealth_browser_and_page(p, proxy_url)
         try:
@@ -167,7 +167,7 @@ def get_armtek_details(vin, proxy_url):
     return data
 
 def get_partkom_details(vin, proxy_url):
-    data = {'car_name': None, 'model_code': None, 'date': None, 'engine': None, 'drive': None, 'error': False, 'source': 'PART-KOM.RU'}
+    data = {'car_name': None, 'model_code': None, 'date': None, 'engine': None, 'drive': None, 'error': False}
     with sync_playwright() as p:
         browser, page = create_stealth_browser_and_page(p, proxy_url)
         try:
@@ -209,7 +209,10 @@ def get_partkom_details(vin, proxy_url):
         finally: browser.close()
     return data
 
-# === ЗАПЧАСТИ ===
+
+# =====================================================================
+# === 2. ПАРСЕРЫ ЗАПЧАСТЕЙ ===
+# =====================================================================
 def run_autodoc_part(vin, node_path, node_kws, part_kws, code_prefix, title):
     time.sleep(random.uniform(0.1, 0.5))
     items =[]
@@ -225,7 +228,6 @@ def run_autodoc_part(vin, node_path, node_kws, part_kws, code_prefix, title):
             try: page.locator("p.catalog-node__name:has-text('Двигатель')").first.click(); time.sleep(1)
             except: pass
             
-            # find_part logic inline
             for step in node_path:
                 try: page.locator(f"p.catalog-node__name:has-text('{step}')").first.click(); time.sleep(0.5)
                 except: break
@@ -311,6 +313,7 @@ def run_elcats_part(vin, mode, title):
                     seen = set()
                     for cid in cnode_ids:
                         try:
+                            # ПРАВИЛЬНЫЙ И БЕЗОПАСНЫЙ КЛИК ПО ID ЧЕРЕЗ XPATH
                             page.locator(f"xpath=//div[@id='{cid}']").click()
                             time.sleep(4)
                             parts = page.evaluate("""() => {
@@ -332,7 +335,7 @@ def run_elcats_part(vin, mode, title):
                                 if pt['code'] not in seen:
                                     seen.add(pt['code'])
                                     fdesc = pt['descr']
-                                    if pt['period']: fdesc += f" [{pt['period']}]"
+                                    if pt['period']: fdesc += f"[{pt['period']}]"
                                     if pt['info']: fdesc += f" ({pt['info']})"
                                     items.append({'source': 'ELCATS', 'title': title, 'desc': fdesc, 'code': pt['code']})
                         except: pass
@@ -405,167 +408,174 @@ def run_armtek_part(vin, mode, title):
 
 
 # =====================================================================
-# === STREAMLIT APP ===
+# === STREAMLIT FRONTEND ===
 # =====================================================================
 
 st.title("VIN DECODER PRO 🌐")
 
-vin = st.text_input("Введите VIN код:", max_chars=17).upper().strip()
+vin = st.text_input("Введите VIN код (Вставка: Ctrl+V):", max_chars=17).upper().strip()
 
 # Хранение состояния
-if 'car_info' not in st.session_state:
-    st.session_state.car_info =[]
-if 'parts_info' not in st.session_state:
-    st.session_state.parts_info =[]
-if 'engine_type' not in st.session_state:
-    st.session_state.engine_type = None
+if 'parts_search_triggered' not in st.session_state:
+    st.session_state.parts_search_triggered = False
 
-# Функция для генерации HTML карточки автомобиля
-def generate_car_html(title, data, bg_color, fg_color):
+def generate_car_html(title, data, bg_color, fg_color, border_col, eng_bg, eng_fg, eng_border):
     if not data or data.get('error'):
         return f"""
-        <div class="car-card">
-            <h3>{title}</h3>
-            <div class="car-name" style="color: #e74c3c;">НЕ НАЙДЕНО</div>
+        <div class="car-card" style="border-color: {border_col};">
+            <div class="car-title" style="background-color: {bg_color}; color: {fg_color};">{title}</div>
+            <div class="car-name" style="color: #e74c3c;">НЕ НАЙДЕНО / ОШИБКА</div>
             <div class="engine-box" style="background-color: #fdf5f6; border-color: #fab1a0;">
-                <div class="eng-label">МОДЕЛЬ ДВИГАТЕЛЯ</div>
+                <div class="eng-label" style="color:#fab1a0;">МОДЕЛЬ ДВИГАТЕЛЯ</div>
                 <div class="eng-val" style="color: #e74c3c;">---</div>
             </div>
         </div>
         """
         
     return f"""
-    <div class="car-card">
-        <h3>{title}</h3>
+    <div class="car-card" style="border-color: {border_col};">
+        <div class="car-title" style="background-color: {bg_color}; color: {fg_color};">{title}</div>
         <div class="car-name" style="color: {fg_color};">{data.get('car_name', 'Неизвестно')}</div>
         <div class="car-model">{data.get('model_code', '')}</div>
         <hr>
-        <span class="param">Дата:</span> <span class="val">{data.get('date', '-')}</span><br>
-        <span class="param">Привод:</span> <span class="val">{data.get('drive', '-')}</span>
-        <div class="engine-box">
-            <div class="eng-label">МОДЕЛЬ ДВИГАТЕЛЯ</div>
-            <div class="eng-val">{data.get('engine', 'НЕТ ДАННЫХ')}</div>
+        <span class="car-param">Дата:</span> <span class="car-val">{data.get('date', '-')}</span><br>
+        <span class="car-param">Привод:</span> <span class="car-val">{data.get('drive', '-')}</span>
+        <div class="engine-box" style="background-color: {eng_bg}; border-color: {eng_border};">
+            <div class="eng-label" style="color: {eng_border};">МОДЕЛЬ ДВИГАТЕЛЯ</div>
+            <div class="eng-val" style="color: {eng_fg};">{data.get('engine', 'НЕТ ДАННЫХ')}</div>
         </div>
     </div>
     """
 
-# Функция для генерации HTML карточки запчасти
 def generate_part_html(item):
     source = item['source']
-    if source == 'AUTODOC': code_class = 'part-code-autodoc'
-    elif source == 'ELCATS': code_class = 'part-code-elcats'
-    else: code_class = 'part-code-armtek'
+    if source == 'AUTODOC': 
+        card_border = "#90caf9"
+        code_class = "background-color: #e3f2fd; color: #0d47a1;"
+    elif source == 'ELCATS': 
+        card_border = "#a5d6a7"
+        code_class = "background-color: #e8f5e9; color: #1b5e20;"
+    else: 
+        card_border = "#ffcc80"
+        code_class = "background-color: #fff3e0; color: #e65100;"
     
     if item['code']:
         return f"""
-        <div class="part-card">
+        <div class="part-card" style="border-color: {card_border};">
             <div class="part-title">{item['title']}</div>
-            <div class="{code_class}">{item['code']}</div>
+            <div class="part-code" style="{code_class}">{item['code']}</div>
             <div class="part-desc">{item['desc']}</div>
         </div>
         """
     else:
         return f"""
-        <div class="part-card">
+        <div class="part-card" style="border-color: #fab1a0;">
             <div class="part-title">{item['title']}</div>
             <div class="part-desc" style="color:red; font-style:italic;">{item['desc']}</div>
         </div>
         """
 
-if st.button("🔍 ИСКАТЬ АВТО", type="primary"):
+
+if st.button("🔍 ИСКАТЬ ИНФОРМАЦИЮ ОБ АВТО", type="primary"):
     if len(vin) != 17:
         st.warning("VIN должен состоять из 17 символов.")
     else:
-        st.session_state.car_info = []
-        st.session_state.parts_info =[]
-        st.session_state.engine_type = None
-
-        with st.spinner("Ищем информацию об автомобиле на 4 сайтах..."):
-            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                f1 = executor.submit(get_autodoc_details, vin, PROXY_LIST[0])
-                f2 = executor.submit(get_exist_details, vin, PROXY_LIST[1])
-                f3 = executor.submit(get_armtek_details, vin, None, PROXY_LIST[2])
-                f4 = executor.submit(get_partkom_details, vin, None, PROXY_LIST[3])
-                
-                res_auto = f1.result()
-                res_exist = f2.result()
-                res_armtek = f3.result()
-                res_partkom = f4.result()
-
-            st.session_state.car_info =[
-                ("AUTODOC.RU", res_auto, "#EBF5FB", "#2980B9"),
-                ("EXIST.RU", res_exist, "#E9F7EF", "#27AE60"),
-                ("ARMTEK.RU", res_armtek, "#FEF5E7", "#D35400"),
-                ("PART-KOM.RU", res_partkom, "#F4ECF7", "#8E44AD")
-            ]
-
-            # Ищем двигатель для авто-поиска запчастей
-            engines =[
-                res_auto.get('engine', ''), res_exist.get('engine', ''), 
-                res_armtek.get('engine', ''), res_partkom.get('engine', '')
-            ]
-            
-            target_eng = next((e for e in engines if e and ("G4NA" in e or "G4KE" in e)), None)
-            
-            if target_eng:
-                if "G4NA" in target_eng: st.session_state.engine_type = "G4NA"
-                elif "G4KE" in target_eng: st.session_state.engine_type = "G4KE"
-            
-            st.rerun()
-
-# ОТОБРАЖЕНИЕ РЕЗУЛЬТАТОВ АВТО
-if st.session_state.car_info:
-    st.markdown("### 🚘 Данные автомобиля")
-    cols = st.columns(4)
-    for i, (title, data, bg, fg) in enumerate(st.session_state.car_info):
-        with cols[i]:
-            st.markdown(generate_car_html(title, data, bg, fg), unsafe_allow_html=True)
-
-# ПОИСК И ОТОБРАЖЕНИЕ ЗАПЧАСТЕЙ
-if st.session_state.engine_type:
-    eng = st.session_state.engine_type
-    
-    # Кнопка для старта (или автостарт если пусто)
-    if not st.session_state.parts_info:
-        st.info(f"Обнаружен двигатель {eng}. Запускаем параллельный поиск запчастей...")
-        with st.spinner(f"Ищем распредвалы / крепления для {eng}... (Это займет около 20-30 секунд)"):
-            
-            with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
-                futures =[]
-                if eng == "G4NA":
-                    futures.append(executor.submit(run_autodoc_part, vin,["Механизм газораспределения", "Распредвал", "Шестерня распредвала"], ['any'],['распредвал', 'впуск'], None, "Распредвал Впуск"))
-                    futures.append(executor.submit(run_autodoc_part, vin,["Механизм газораспределения", "Распредвал", "Шестерня распредвала"],['any'],['распредвал', 'выпуск'], None, "Распредвал Выпуск"))
-                    futures.append(executor.submit(run_elcats_part, vin, "G4NA_intake", "Распредвал Впуск"))
-                    futures.append(executor.submit(run_elcats_part, vin, "G4NA_exhaust", "Распредвал Выпуск"))
-                    futures.append(executor.submit(run_armtek_part, vin, "G4NA_intake", "Распредвал Впуск"))
-                    futures.append(executor.submit(run_armtek_part, vin, "G4NA_exhaust", "Распредвал Выпуск"))
-                elif eng == "G4KE":
-                    futures.append(executor.submit(run_autodoc_part, vin,["Блок-картер", "Блок-картер"],["крышка", "ременного"], None, "21350", "Лобная крышка"))
-                    futures.append(executor.submit(run_autodoc_part, vin,["Крепление двигателя", "Кронштейн двигателя"],["подвеска", "двигателя"], None, "21670", "Кронштейн"))
-                    futures.append(executor.submit(run_elcats_part, vin, "G4KE_cover", "Лобная крышка"))
-                    futures.append(executor.submit(run_elcats_part, vin, "G4KE_bracket", "Кронштейн"))
-                    futures.append(executor.submit(run_armtek_part, vin, "G4KE_cover", "Лобная крышка"))
-                    futures.append(executor.submit(run_armtek_part, vin, "G4KE_bracket", "Кронштейн"))
-
-                # Собираем результаты (flatten lists)
-                for f in concurrent.futures.as_completed(futures):
-                    st.session_state.parts_info.extend(f.result())
-            
-            st.rerun()
-
-    if st.session_state.parts_info:
-        st.markdown("### 🔧 Найденные запчасти")
-        p_cols = st.columns(3)
+        # Сброс старых данных
+        st.session_state.parts_search_triggered = False
         
-        with p_cols[0]:
-            st.markdown("<h4 style='text-align:center; color:#0d47a1;'>AUTODOC</h4>", unsafe_allow_html=True)
-            for p in st.session_state.parts_info:
-                if p['source'] == 'AUTODOC': st.markdown(generate_part_html(p), unsafe_allow_html=True)
-        with p_cols[1]:
-            st.markdown("<h4 style='text-align:center; color:#1b5e20;'>ELCATS</h4>", unsafe_allow_html=True)
-            for p in st.session_state.parts_info:
-                if p['source'] == 'ELCATS': st.markdown(generate_part_html(p), unsafe_allow_html=True)
-        with p_cols[2]:
-            st.markdown("<h4 style='text-align:center; color:#e65100;'>ARMTEK</h4>", unsafe_allow_html=True)
-            for p in st.session_state.parts_info:
-                if p['source'] == 'ARMTEK': st.markdown(generate_part_html(p), unsafe_allow_html=True)
+        st.markdown("### 🚘 Данные автомобиля")
+        car_cols = st.columns(4)
+        car_placeholders = [col.empty() for col in car_cols]
+        
+        for p in car_placeholders:
+            p.info("Ожидание данных...")
+
+        engines_found =[]
+
+        with st.spinner("Собираем данные в 4 потоках..."):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                # Очередь задач с параметрами цветов для UI
+                fut_to_col = {
+                    executor.submit(get_autodoc_details, vin, PROXY_LIST[0]): (0, "AUTODOC", "#EBF5FB", "#2980B9", "#D6EAF8", "#f4f6f9", "#2c3e50", "#dcdde1"),
+                    executor.submit(get_exist_details, vin, PROXY_LIST[1]):   (1, "EXIST", "#E9F7EF", "#27AE60", "#D5F5E3", "#f4f6f9", "#2c3e50", "#dcdde1"),
+                    executor.submit(get_armtek_details, vin, PROXY_LIST[2]):  (2, "ARMTEK", "#FEF5E7", "#D35400", "#FDEBD0", "#f4f6f9", "#2c3e50", "#dcdde1"),
+                    executor.submit(get_partkom_details, vin, PROXY_LIST[3]): (3, "PART-KOM", "#F4ECF7", "#8E44AD", "#EBDEF0", "#f4f6f9", "#2c3e50", "#dcdde1"),
+                }
+                
+                # МГНОВЕННЫЙ вывод по мере готовности потоков
+                for future in concurrent.futures.as_completed(fut_to_col):
+                    idx, title, bg, fg, border, ebg, efg, eborder = fut_to_col[future]
+                    try:
+                        data = future.result()
+                    except Exception as e:
+                        data = {'error': True}
+                    
+                    # Перекрашиваем блок ДВС, если он найден
+                    eng = data.get('engine', '')
+                    if eng:
+                        engines_found.append(eng)
+                        ebg, efg, eborder = "#fff0f0", "#c0392b", "#ffcccc" # Красный акцент для найденного ДВС
+                        
+                    html = generate_car_html(title, data, bg, fg, border, ebg, efg, eborder)
+                    car_placeholders[idx].markdown(html, unsafe_allow_html=True)
+                    
+        # Проверяем, нужно ли искать запчасти
+        target_eng = None
+        for e in engines_found:
+            if "G4NA" in e or "G4KE" in e:
+                target_eng = "G4NA" if "G4NA" in e else "G4KE"
+                break
+                
+        if target_eng:
+            st.session_state.parts_search_triggered = True
+            st.success(f"Обнаружен двигатель {target_eng}! Запускаем автоматический поиск запчастей (6 потоков)...")
+            
+            st.markdown("### 🔧 Найденные запчасти")
+            p_cols = st.columns(3)
+            
+            with p_cols[0]:
+                st.markdown("<h4 style='text-align:center; color:#0d47a1;'>AUTODOC</h4>", unsafe_allow_html=True)
+                auto_cont = st.container()
+            with p_cols[1]:
+                st.markdown("<h4 style='text-align:center; color:#1b5e20;'>ELCATS (Exist)</h4>", unsafe_allow_html=True)
+                elcats_cont = st.container()
+            with p_cols[2]:
+                st.markdown("<h4 style='text-align:center; color:#e65100;'>ARMTEK</h4>", unsafe_allow_html=True)
+                armtek_cont = st.container()
+                
+            containers = {'AUTODOC': auto_cont, 'ELCATS': elcats_cont, 'ARMTEK': armtek_cont}
+
+            # Формируем задачи
+            tasks =[]
+            if target_eng == "G4NA":
+                tasks = [
+                    (run_autodoc_part, (vin,["Механизм газораспределения", "Распредвал", "Шестерня распредвала"], ['any'], ['распредвал', 'впуск'], None, "Распредвал Впуск")),
+                    (run_autodoc_part, (vin,["Механизм газораспределения", "Распредвал", "Шестерня распредвала"], ['any'],['распредвал', 'выпуск'], None, "Распредвал Выпуск")),
+                    (run_elcats_part, (vin, "G4NA_intake", "Распредвал Впуск")),
+                    (run_elcats_part, (vin, "G4NA_exhaust", "Распредвал Выпуск")),
+                    (run_armtek_part, (vin, "G4NA_intake", "Распредвал Впуск")),
+                    (run_armtek_part, (vin, "G4NA_exhaust", "Распредвал Выпуск")),
+                ]
+            else:
+                tasks = [
+                    (run_autodoc_part, (vin,["Блок-картер", "Блок-картер"], ["крышка", "ременного"], None, "21350", "Лобная крышка")),
+                    (run_autodoc_part, (vin,["Крепление двигателя", "Кронштейн двигателя"], ["подвеска", "двигателя"], None, "21670", "Кронштейн")),
+                    (run_elcats_part, (vin, "G4KE_cover", "Лобная крышка")),
+                    (run_elcats_part, (vin, "G4KE_bracket", "Кронштейн")),
+                    (run_armtek_part, (vin, "G4KE_cover", "Лобная крышка")),
+                    (run_armtek_part, (vin, "G4KE_bracket", "Кронштейн")),
+                ]
+
+            # Выполняем и МОМЕНТАЛЬНО выводим результаты по мере их нахождения
+            with st.spinner("Ожидайте, результаты будут появляться по мере их нахождения..."):
+                with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+                    parts_futs =[executor.submit(fn, *args) for fn, args in tasks]
+                    
+                    for future in concurrent.futures.as_completed(parts_futs):
+                        items = future.result()
+                        for item in items:
+                            src = item.get('source')
+                            if src in containers:
+                                containers[src].markdown(generate_part_html(item), unsafe_allow_html=True)
+                                
+            st.success("✅ Все потоки завершили работу!")
