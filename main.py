@@ -7,22 +7,30 @@ import random
 import urllib.parse
 import concurrent.futures
 import streamlit as st
-import streamlit.components.v1 as components
+import subprocess
 
 # === АВТОМАТИЧЕСКАЯ УСТАНОВКА БРАУЗЕРОВ ДЛЯ СЕРВЕРА ===
 @st.cache_resource
 def install_browsers():
-    os.system("playwright install chromium")
-install_browsers()
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright"])
+    print("Установка браузеров Playwright...")
+    subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"])
 
+install_browsers()
 from playwright.sync_api import sync_playwright
 
 # --- КОНФИГУРАЦИЯ ---
 st.set_page_config(page_title="VIN Decoder Ultimate", layout="wide")
 
-PROXY_LIST =[None, None, None, None]
+# ПРОКСИ (4 слота: Autodoc, Exist/Elcats, Armtek, Part-kom)
+# На серверах ОБЯЗАТЕЛЬНО используйте прокси, иначе Cloudflare заблокирует IP!
+# Пример: "http://login:pass@ip:port"
+PROXY_LIST = [None, None, None, None]
 
-# Определение платформы: локальный ПК или онлайн-сервер
+# Определение платформы
 IS_SERVER = sys.platform.startswith('linux')
 
 st.markdown("""
@@ -47,13 +55,19 @@ st.markdown("""
 # === ДВИЖОК БРАУЗЕРА ===
 # =====================================================================
 def create_stealth_browser_and_page(playwright_instance, proxy_url=None):
-    args = ['--disable-blink-features=AutomationControlled']
+    args =[
+        '--disable-blink-features=AutomationControlled',
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--disable-gpu'
+    ]
     
-    # На сервере СТРОГО headless=True, на ПК - False (для обхода защит)
     launch_options = {
-        'headless': True if IS_SERVER else False,
+        'headless': True if IS_SERVER else False, # На сервере всегда True
         'args': args,
-        'ignore_default_args':["--enable-automation"]
+        'ignore_default_args': ["--enable-automation"]
     }
     if proxy_url: launch_options['proxy'] = {"server": proxy_url}
     
@@ -70,7 +84,7 @@ def create_stealth_browser_and_page(playwright_instance, proxy_url=None):
     return browser, page
 
 # =====================================================================
-# === 1. ПАРСЕРЫ АВТОМОБИЛЕЙ ===
+# === ПАРСЕРЫ АВТОМОБИЛЕЙ ===
 # =====================================================================
 def get_autodoc_details(vin, proxy_url):
     data = {'car_name': None, 'model_code': None, 'date': None, 'engine': None, 'drive': None, 'error': False}
@@ -116,7 +130,7 @@ def get_exist_details(vin, proxy_url):
     with sync_playwright() as p:
         browser, page = create_stealth_browser_and_page(p, proxy_url)
         try:
-            page.goto(f"https://exist.ru/Price/Empty.aspx?q={vin}")
+            page.goto(f"https://exist.ru/Price/Empty.aspx?q={vin}", timeout=60000)
             page.wait_for_selector('.car-info', timeout=20000)
             data['car_name'] = page.locator('.car-info__car-name').first.text_content().strip()
             data['date'] = page.locator('.car-info__car-years').first.text_content().strip()
@@ -145,7 +159,7 @@ def get_armtek_details(vin, proxy_url):
     with sync_playwright() as p:
         browser, page = create_stealth_browser_and_page(p, proxy_url)
         try:
-            page.goto(f"https://armtek.ru/search?text={vin}")
+            page.goto(f"https://armtek.ru/search?text={vin}", timeout=60000)
             time.sleep(3); page.keyboard.press("Escape")
             page.wait_for_selector("div.car__header", timeout=15000)
             try:
@@ -175,7 +189,7 @@ def get_partkom_details(vin, proxy_url):
     with sync_playwright() as p:
         browser, page = create_stealth_browser_and_page(p, proxy_url)
         try:
-            page.goto(f"https://part-kom.ru/catalog-vin?vin={vin}")
+            page.goto(f"https://part-kom.ru/catalog-vin?vin={vin}", timeout=60000)
             iframe_obj = None
             found = False
             for _ in range(150):
@@ -213,10 +227,50 @@ def get_partkom_details(vin, proxy_url):
         finally: browser.close()
     return data
 
+# =====================================================================
+# === ПАРСЕРЫ ЗАПЧАСТЕЙ ===
+# =====================================================================
 
-# =====================================================================
-# === 2. ПАРСЕРЫ ЗАПЧАСТЕЙ ===
-# =====================================================================
+def find_part(page, base_url, path, node_kws, part_kws, code_prefix):
+    page.goto(base_url)
+    page.wait_for_load_state()
+    for step in path:
+        try: page.locator(f"p.catalog-node__name:has-text('{step}')").first.click(); time.sleep(0.5)
+        except: return None
+    try: page.wait_for_selector('.goods__item, .node-item', timeout=5000)
+    except: return None
+    working_page = page
+    needs_close = False
+    if page.locator('.goods__item').count() == 0:
+        nodes = page.locator('.node-item').all()
+        target = next((n for n in nodes if all(k in n.inner_text().lower() for k in node_kws)), None)
+        if not target and 'any' in node_kws and nodes: target = nodes[0]
+        if target:
+            with page.context.expect_page() as new_p: target.locator("a:has-text('Показать все')").first.click()
+            working_page = new_p.value
+            working_page.wait_for_load_state()
+            needs_close = True
+        else: return None
+    final = None
+    try:
+        working_page.wait_for_selector('.goods__item', timeout=8000)
+        box = working_page.locator('.box-goods')
+        if box.count(): box.evaluate("el => el.scrollTop = el.scrollHeight"); time.sleep(0.5)
+        for g in working_page.locator('.goods__item').all():
+            txt = g.inner_text().lower()
+            if (part_kws and all(w in txt for w in part_kws)) or (code_prefix and code_prefix in txt):
+                href = g.locator('a.goods__item-link').get_attribute('href')
+                working_page.goto("https://www.autodoc.ru" + href)
+                working_page.wait_for_selector('.properties__description-text', timeout=5000)
+                desc = working_page.locator('.properties__description-text').inner_text()
+                match = re.search(r'([A-Z0-9]{5,20})$', desc.strip())
+                final = {'text': desc, 'code': match.group(1) if match else None}
+                break
+    except: pass
+    finally:
+        if needs_close: working_page.close()
+    return final
+
 def run_autodoc_part(vin, node_path, node_kws, part_kws, code_prefix, title):
     time.sleep(random.uniform(0.1, 0.5))
     items =[]
@@ -231,41 +285,11 @@ def run_autodoc_part(vin, node_path, node_kws, part_kws, code_prefix, title):
             page.reload(); page.wait_for_load_state()
             try: page.locator("p.catalog-node__name:has-text('Двигатель')").first.click(); time.sleep(1)
             except: pass
-            
-            for step in node_path:
-                try: page.locator(f"p.catalog-node__name:has-text('{step}')").first.click(); time.sleep(0.5)
-                except: break
-            try: page.wait_for_selector('.goods__item, .node-item', timeout=5000)
-            except: pass
-            
-            working_page = page
-            if page.locator('.goods__item').count() == 0:
-                nodes = page.locator('.node-item').all()
-                target = next((n for n in nodes if all(k in n.inner_text().lower() for k in node_kws)), None)
-                if not target and 'any' in node_kws and nodes: target = nodes[0]
-                if target:
-                    with page.context.expect_page() as new_p: target.locator("a:has-text('Показать все')").first.click()
-                    working_page = new_p.value
-                    working_page.wait_for_load_state()
-            
-            try:
-                working_page.wait_for_selector('.goods__item', timeout=8000)
-                if working_page.locator('.box-goods').count(): working_page.evaluate("el => el.scrollTop = el.scrollHeight"); time.sleep(0.5)
-                for g in working_page.locator('.goods__item').all():
-                    txt = g.inner_text().lower()
-                    if (part_kws and all(w in txt for w in part_kws)) or (code_prefix and code_prefix in txt):
-                        href = g.locator('a.goods__item-link').get_attribute('href')
-                        working_page.goto("https://www.autodoc.ru" + href)
-                        working_page.wait_for_selector('.properties__description-text', timeout=5000)
-                        desc = working_page.locator('.properties__description-text').inner_text()
-                        m = re.search(r'([A-Z0-9]{5,20})$', desc.strip())
-                        code = m.group(1) if m else None
-                        items.append({'source': 'AUTODOC', 'title': title, 'desc': desc, 'code': code})
-                        break
-            except: pass
-        except: pass
+            res = find_part(page, page.url, node_path, node_kws, part_kws, code_prefix)
+            if res: items.append({'source': 'AUTODOC', 'title': title, 'desc': res['text'], 'code': res['code']})
+            else: items.append({'source': 'AUTODOC', 'title': title, 'desc': 'Не найдено', 'code': None})
+        except Exception as e: items.append({'source': 'AUTODOC', 'title': title, 'desc': f'Ошибка: {e}', 'code': None})
         finally: browser.close()
-    if not items: items.append({'source': 'AUTODOC', 'title': title, 'desc': 'Не найдено', 'code': None})
     return items
 
 def run_elcats_part(vin, mode, title):
@@ -338,7 +362,7 @@ def run_elcats_part(vin, mode, title):
                                 if pt['code'] not in seen:
                                     seen.add(pt['code'])
                                     fdesc = pt['descr']
-                                    if pt['period']: fdesc += f" [{pt['period']}]"
+                                    if pt['period']: fdesc += f"[{pt['period']}]"
                                     if pt['info']: fdesc += f" ({pt['info']})"
                                     items.append({'source': 'ELCATS', 'title': title, 'desc': fdesc, 'code': pt['code']})
                         except: pass
@@ -409,40 +433,15 @@ def run_armtek_part(vin, mode, title):
     if not items: items.append({'source': 'ARMTEK', 'title': title, 'desc': 'Не найдено', 'code': None})
     return items
 
+
 # =====================================================================
 # === STREAMLIT FRONTEND ===
 # =====================================================================
-
 st.title("VIN DECODER PRO 🌐")
 
-# --- ИСПРАВЛЕННАЯ КНОПКА ВСТАВКИ ИЗ БУФЕРА НА JS ---
-components.html("""
-<script>
-function pasteClipboard() {
-    navigator.clipboard.readText().then(text => {
-        const inputs = window.parent.document.querySelectorAll('input[type="text"]');
-        if (inputs.length > 0) {
-            let input = inputs[0];
-            let nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-            nativeInputValueSetter.call(input, text.trim());
-            input.dispatchEvent(new Event("input", { bubbles: true }));
-        }
-    }).catch(err => {
-        alert('Браузер заблокировал доступ к буферу. Просто кликните в поле и нажмите Ctrl+V.');
-    });
-}
-</script>
-<button onclick="pasteClipboard()" style="background:#ecf0f1; border:1px solid #bdc3c7; padding:8px 15px; border-radius:5px; cursor:pointer; font-weight:bold; color:#2c3e50;">📋 Вставить из буфера</button>
-<span style="font-family:sans-serif; font-size:12px; color:#7f8c8d; margin-left: 10px;">(Или кликните в поле ниже и нажмите Ctrl+V)</span>
-""", height=50)
-
-vin_raw = st.text_input("Введите VIN код:")
-# Очищаем VIN от любых пробелов, тире и спецсимволов перед проверкой
+vin_raw = st.text_input("Введите VIN код (Вставка: Ctrl+V):")
+# Удаляем ВСЁ, кроме букв и цифр (никаких пробелов, тире и прочего мусора из буфера)
 vin = re.sub(r'[^A-Z0-9]', '', vin_raw.upper())
-
-# Хранение состояния
-if 'parts_search_triggered' not in st.session_state:
-    st.session_state.parts_search_triggered = False
 
 def generate_car_html(title, data, bg_color, fg_color, border_col, eng_bg, eng_fg, eng_border):
     if not data or data.get('error'):
@@ -501,13 +500,11 @@ def generate_part_html(item):
 
 if st.button("🔍 ИСКАТЬ АВТО И ЗАПЧАСТИ", type="primary"):
     if len(vin) != 17:
-        st.warning(f"⚠️ Ошибка: VIN должен состоять из 17 символов! Сервер получил {len(vin)} символов: '{vin}'")
+        st.warning(f"⚠️ Ошибка: VIN должен состоять строго из 17 символов! Система получила {len(vin)} символов: '{vin}'")
     else:
-        st.session_state.parts_search_triggered = False
-        
         st.markdown("### 🚘 Данные автомобиля")
         car_cols = st.columns(4)
-        car_phs = [col.empty() for col in car_cols]
+        car_phs =[col.empty() for col in car_cols]
         for p in car_phs: p.info("Поиск...")
 
         st.markdown("### 🔧 Найденные запчасти (Автопоиск)")
@@ -553,10 +550,10 @@ if st.button("🔍 ИСКАТЬ АВТО И ЗАПЧАСТИ", type="primary"):
                             if not parts_search_started and ("G4NA" in eng or "G4KE" in eng):
                                 parts_search_started = True
                                 target_eng = "G4NA" if "G4NA" in eng else "G4KE"
-                                parts_status.success(f"Обнаружен двигатель {target_eng}! Ищем запчасти...")
+                                parts_status.success(f"Обнаружен двигатель {target_eng}! Запускаем фоновый поиск запчастей...")
                                 
                                 if target_eng == "G4NA":
-                                    tasks = [
+                                    tasks =[
                                         (run_autodoc_part, (vin,["Механизм газораспределения", "Распредвал", "Шестерня распредвала"],['any'],['распредвал', 'впуск'], None, "Распредвал Впуск")),
                                         (run_autodoc_part, (vin,["Механизм газораспределения", "Распредвал", "Шестерня распредвала"], ['any'],['распредвал', 'выпуск'], None, "Распредвал Выпуск")),
                                         (run_elcats_part, (vin, "G4NA_intake", "Распредвал Впуск")),
@@ -582,6 +579,7 @@ if st.button("🔍 ИСКАТЬ АВТО И ЗАПЧАСТИ", type="primary"):
                         car_phs[idx].markdown(html, unsafe_allow_html=True)
                         
                     elif fut in parts_futs:
+                        # Деталь найдена! СРАЗУ ВЫВОДИМ НА ЭКРАН!
                         try: items = fut.result()
                         except: items =[]
                         
