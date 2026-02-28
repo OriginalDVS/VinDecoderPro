@@ -6,43 +6,112 @@ import random
 import urllib.parse
 import concurrent.futures
 import streamlit as st
+import subprocess
 
-# === АВТОМАТИЧЕСКАЯ УСТАНОВКА БРАУЗЕРА ДЛЯ СЕРВЕРА ===
+# === АВТОМАТИЧЕСКАЯ УСТАНОВКА БРАУЗЕРОВ ДЛЯ СЕРВЕРА ===
 @st.cache_resource
-def install_playwright():
-    # Эта команда скачивает сам браузер Chromium внутри сервера
-    os.system("playwright install chromium")
-    os.system("playwright install-deps chromium")
+def install_dependencies():
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright"])
+    subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"])
 
-install_playwright()
+install_dependencies()
+
 from playwright.sync_api import sync_playwright
 
 # --- КОНФИГУРАЦИЯ ---
 st.set_page_config(page_title="VIN Decoder Ultimate", layout="wide")
 
 # ПРОКСИ (4 слота: Autodoc, Exist/Elcats, Armtek, Part-kom)
-PROXY_LIST = [None, None, None, None]
+PROXY_LIST =[None, None, None, None]
 
 # Определение платформы (для скрытия браузера на серверах Linux)
 IS_SERVER = sys.platform.startswith('linux')
 
-st.markdown("""
-<style>
-.car-card { border: 1px solid #dcdde1; border-radius: 8px; padding: 15px; background-color: #ffffff; box-shadow: 0 4px 6px rgba(0,0,0,0.05); height: 100%;}
-.car-title { text-align: center; font-weight: 900; font-size: 16px; margin-bottom: 15px; padding: 5px; border-radius: 4px; }
-.car-name { font-weight: bold; text-align: center; font-size: 18px; margin-bottom: 5px; }
-.car-model { color: #7f8c8d; text-align: center; font-size: 14px; font-family: monospace; margin-bottom: 10px; }
-.car-param { font-size: 14px; color: #7f8c8d; }
-.car-val { font-size: 14px; color: #2c3e50; font-weight: bold; }
-.engine-box { border: 2px solid; border-radius: 5px; padding: 10px; text-align: center; margin-top: 15px; }
-.eng-label { font-size: 11px; font-weight: bold; margin-bottom: 3px; }
-.eng-val { font-size: 24px; font-weight: bold; font-family: monospace; }
-.part-card { border: 1px solid; border-radius: 8px; padding: 15px; margin-bottom: 10px; background-color: #ffffff;}
-.part-title { font-weight: bold; font-size: 14px; color: #2c3e50; margin-bottom: 10px; }
-.part-code { padding: 8px; border-radius: 4px; text-align: center; font-family: monospace; font-size: 18px; font-weight: bold; margin-bottom: 8px;}
-.part-desc { font-size: 12px; color: #7f8c8d; line-height: 1.4;}
-</style>
-""", unsafe_allow_html=True)
+# --- ВСТАВКА ИЗ БУФЕРА ЧЕРЕЗ JS (РАБОТАЕТ НА СЕРВЕРАХ) ---
+# На серверах pyperclip не работает, так как у сервера нет вашего буфера обмена.
+# Поэтому мы используем HTML/JS кнопку, которая читает буфер вашего браузера.
+st.components.v1.html("""
+<script>
+function pasteClipboard() {
+    navigator.clipboard.readText().then(text => {
+        const inputs = window.parent.document.querySelectorAll('input[type="text"]');
+        if (inputs.length > 0) {
+            let input = inputs[0];
+            let nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+            nativeInputValueSetter.call(input, text.trim());
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+    }).catch(err => {
+        alert('Пожалуйста, кликните в поле ввода и нажмите Ctrl+V.');
+    });
+}
+</script>
+<button onclick="pasteClipboard()" style="background:#ecf0f1; border:1px solid #bdc3c7; padding:8px 15px; border-radius:5px; cursor:pointer; font-weight:bold; color:#2c3e50;">📋 Вставить из буфера</button>
+<span style="font-family:sans-serif; font-size:12px; color:#7f8c8d; margin-left: 10px;">(Или кликните в поле ниже и нажмите Ctrl+V)</span>
+""", height=50)
+
+st.title("VIN DECODER PRO 🌐")
+
+vin_raw = st.text_input("Введите 17-значный VIN код:", max_chars=17)
+
+# Очищаем VIN
+vin = re.sub(r'[^A-Z0-9]', '', vin_raw.upper())
+
+if vin_raw:
+    if len(vin) == 17:
+        st.caption(f"✅ Введено символов: 17 / 17")
+    else:
+        st.error(f"❌ Ошибка длины: Вы ввели {len(vin)} символов. Нужно ровно 17.")
+
+# =====================================================================
+# === HTML ГЕНЕРАТОРЫ (БЕЗ ОТСТУПОВ ДЛЯ ИЗБЕЖАНИЯ БАГОВ MARKDOWN) ===
+# =====================================================================
+def generate_car_html(title, data, bg_color, fg_color, border_col, eng_bg, eng_fg, eng_border):
+    if not data or data.get('error'):
+        return f"""<div style="border: 1px solid {border_col}; border-radius: 8px; padding: 15px; background-color: #ffffff; box-shadow: 0 4px 6px rgba(0,0,0,0.05); height: 100%;">
+<div style="text-align: center; font-weight: 900; font-size: 16px; margin-bottom: 15px; padding: 5px; border-radius: 4px; background-color: {bg_color}; color: {fg_color};">{title}</div>
+<div style="font-weight: bold; text-align: center; font-size: 18px; margin-bottom: 5px; color: #e74c3c;">НЕ НАЙДЕНО / ОШИБКА</div>
+<div style="border: 2px solid #fab1a0; border-radius: 5px; padding: 10px; text-align: center; margin-top: 15px; background-color: #fdf5f6;">
+<div style="font-size: 11px; font-weight: bold; margin-bottom: 3px; color:#fab1a0;">МОДЕЛЬ ДВИГАТЕЛЯ</div>
+<div style="font-size: 24px; font-weight: bold; font-family: monospace; color: #e74c3c;">---</div>
+</div>
+</div>"""
+    return f"""<div style="border: 1px solid {border_col}; border-radius: 8px; padding: 15px; background-color: #ffffff; box-shadow: 0 4px 6px rgba(0,0,0,0.05); height: 100%;">
+<div style="text-align: center; font-weight: 900; font-size: 16px; margin-bottom: 15px; padding: 5px; border-radius: 4px; background-color: {bg_color}; color: {fg_color};">{title}</div>
+<div style="font-weight: bold; text-align: center; font-size: 18px; margin-bottom: 5px; color: {fg_color};">{data.get('car_name', 'Неизвестно')}</div>
+<div style="color: #7f8c8d; text-align: center; font-size: 14px; font-family: monospace; margin-bottom: 10px;">{data.get('model_code', '')}</div>
+<hr style="margin: 10px 0;">
+<span style="font-size: 14px; color: #7f8c8d;">Дата:</span> <span style="font-size: 14px; color: #2c3e50; font-weight: bold;">{data.get('date', '-')}</span><br>
+<span style="font-size: 14px; color: #7f8c8d;">Привод:</span> <span style="font-size: 14px; color: #2c3e50; font-weight: bold;">{data.get('drive', '-')}</span>
+<div style="border: 2px solid {eng_border}; border-radius: 5px; padding: 10px; text-align: center; margin-top: 15px; background-color: {eng_bg};">
+<div style="font-size: 11px; font-weight: bold; margin-bottom: 3px; color: {eng_border};">МОДЕЛЬ ДВИГАТЕЛЯ</div>
+<div style="font-size: 24px; font-weight: bold; font-family: monospace; color: {eng_fg};">{data.get('engine', 'НЕТ ДАННЫХ')}</div>
+</div>
+</div>"""
+
+def generate_part_html(item):
+    source = item['source']
+    if source == 'AUTODOC': 
+        card_border, code_style = "#90caf9", "background-color: #e3f2fd; color: #0d47a1;"
+    elif source == 'ELCATS': 
+        card_border, code_style = "#a5d6a7", "background-color: #e8f5e9; color: #1b5e20;"
+    else: 
+        card_border, code_style = "#ffcc80", "background-color: #fff3e0; color: #e65100;"
+    
+    if item['code']:
+        return f"""<div style="border: 1px solid {card_border}; border-radius: 8px; padding: 15px; margin-bottom: 10px; background-color: #ffffff;">
+<div style="font-weight: bold; font-size: 14px; color: #2c3e50; margin-bottom: 10px;">{item['title']}</div>
+<div style="{code_style} padding: 8px; border-radius: 4px; text-align: center; font-family: monospace; font-size: 18px; font-weight: bold; margin-bottom: 8px;">{item['code']}</div>
+<div style="font-size: 12px; color: #7f8c8d; line-height: 1.4;">{item['desc']}</div>
+</div>"""
+    else:
+        return f"""<div style="border: 1px solid #fab1a0; border-radius: 8px; padding: 15px; margin-bottom: 10px; background-color: #ffffff;">
+<div style="font-weight: bold; font-size: 14px; color: #2c3e50; margin-bottom: 10px;">{item['title']}</div>
+<div style="font-size: 12px; color: red; font-style: italic; line-height: 1.4;">{item['desc']}</div>
+</div>"""
 
 # =====================================================================
 # === ДВИЖОК БРАУЗЕРА ===
@@ -53,12 +122,10 @@ def create_stealth_browser_and_page(playwright_instance, proxy_url=None):
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-gpu'
     ]
     
-    # На сервере СТРОГО headless=True
     launch_options = {
-        'headless': True if IS_SERVER else False,
+        'headless': True if IS_SERVER else False, 
         'args': args,
         'ignore_default_args': ["--enable-automation"]
     }
@@ -417,75 +484,8 @@ def run_armtek_part(vin, mode, title):
     return items
 
 # =====================================================================
-# === STREAMLIT FRONTEND ===
+# === ГЛАВНЫЙ ЦИКЛ ПОИСКА STREAMLIT ===
 # =====================================================================
-
-st.title("VIN DECODER PRO 🌐")
-st.info("💡 **Как вставить VIN:** Кликните мышкой в поле ниже и нажмите **Ctrl+V** на клавиатуре.")
-
-vin_raw = st.text_input("Введите 17-значный VIN код:", max_chars=17)
-
-# Очищаем VIN
-vin = re.sub(r'[^A-Z0-9]', '', vin_raw.upper())
-
-if vin_raw:
-    if len(vin) == 17:
-        st.caption(f"✅ Введено символов: 17 / 17")
-    else:
-        st.error(f"❌ Ошибка длины: Вы ввели {len(vin)} символов. Нужно ровно 17.")
-
-def generate_car_html(title, data, bg_color, fg_color, border_col, eng_bg, eng_fg, eng_border):
-    if not data or data.get('error'):
-        return f"""
-        <div class="car-card" style="border-color: {border_col};">
-            <div class="car-title" style="background-color: {bg_color}; color: {fg_color};">{title}</div>
-            <div class="car-name" style="color: #e74c3c;">НЕ НАЙДЕНО / ОШИБКА</div>
-            <div class="engine-box" style="background-color: #fdf5f6; border-color: #fab1a0;">
-                <div class="eng-label" style="color:#fab1a0;">МОДЕЛЬ ДВИГАТЕЛЯ</div>
-                <div class="eng-val" style="color: #e74c3c;">---</div>
-            </div>
-        </div>
-        """
-    return f"""
-    <div class="car-card" style="border-color: {border_col};">
-        <div class="car-title" style="background-color: {bg_color}; color: {fg_color};">{title}</div>
-        <div class="car-name" style="color: {fg_color};">{data.get('car_name', 'Неизвестно')}</div>
-        <div class="car-model">{data.get('model_code', '')}</div>
-        <hr style="margin: 10px 0;">
-        <span class="car-param">Дата:</span> <span class="car-val">{data.get('date', '-')}</span><br>
-        <span class="car-param">Привод:</span> <span class="car-val">{data.get('drive', '-')}</span>
-        <div class="engine-box" style="background-color: {eng_bg}; border-color: {eng_border};">
-            <div class="eng-label" style="color: {eng_border};">МОДЕЛЬ ДВИГАТЕЛЯ</div>
-            <div class="eng-val" style="color: {eng_fg};">{data.get('engine', 'НЕТ ДАННЫХ')}</div>
-        </div>
-    </div>
-    """
-
-def generate_part_html(item):
-    source = item['source']
-    if source == 'AUTODOC': 
-        card_border, code_class = "#90caf9", "background-color: #e3f2fd; color: #0d47a1;"
-    elif source == 'ELCATS': 
-        card_border, code_class = "#a5d6a7", "background-color: #e8f5e9; color: #1b5e20;"
-    else: 
-        card_border, code_class = "#ffcc80", "background-color: #fff3e0; color: #e65100;"
-    
-    if item['code']:
-        return f"""
-        <div class="part-card" style="border-color: {card_border};">
-            <div class="part-title">{item['title']}</div>
-            <div class="part-code" style="{code_class}">{item['code']}</div>
-            <div class="part-desc">{item['desc']}</div>
-        </div>
-        """
-    else:
-        return f"""
-        <div class="part-card" style="border-color: #fab1a0;">
-            <div class="part-title">{item['title']}</div>
-            <div class="part-desc" style="color:red; font-style:italic;">{item['desc']}</div>
-        </div>
-        """
-
 if st.button("🔍 ИСКАТЬ АВТО И ЗАПЧАСТИ", type="primary"):
     if len(vin) != 17:
         st.warning(f"Остановите поиск. Длина VIN должна быть строго 17 символов.")
