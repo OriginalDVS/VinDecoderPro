@@ -5,24 +5,28 @@ import os
 import random
 import urllib.parse
 import concurrent.futures
+import subprocess
 import streamlit as st
-import streamlit.components.v1 as components
 
-# === УСТАНОВКА БРАУЗЕРА ПРИ ЗАПУСКЕ ===
+# === АВТОМАТИЧЕСКАЯ УСТАНОВКА БРАУЗЕРОВ И БИБЛИОТЕК ===
 @st.cache_resource
-def install_browsers():
-    os.system("playwright install chromium")
-install_browsers()
+def install_dependencies():
+    try:
+        from playwright.sync_api import sync_playwright
+        import pyperclip
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright", "pyperclip"])
+    subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"])
+
+install_dependencies()
 
 from playwright.sync_api import sync_playwright
+import pyperclip
 
 # --- КОНФИГУРАЦИЯ ---
 st.set_page_config(page_title="VIN Decoder Ultimate", layout="wide")
 
-# ПРОКСИ (4 слота: Autodoc, Exist/Elcats, Armtek, Part-kom)
 PROXY_LIST = [None, None, None, None]
-
-# Определение платформы (для скрытия браузера на серверах Linux)
 IS_SERVER = sys.platform.startswith('linux')
 
 st.markdown("""
@@ -44,17 +48,101 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # =====================================================================
+# === ФУНКЦИЯ ВСТАВКИ ИЗ БУФЕРА (ОРИГИНАЛЬНАЯ, РАБОЧАЯ) ===
+# =====================================================================
+def paste_vin_from_clipboard():
+    try:
+        text = pyperclip.paste()
+        clean_text = re.sub(r'[^a-zA-Z0-9]', '', text).upper()
+        if clean_text:
+            st.session_state.vin_input = clean_text[:17]
+        else:
+            st.warning("Буфер обмена пуст или не содержит текста")
+    except Exception as e:
+        st.error(f"Ошибка доступа к буферу обмена: {e}")
+
+st.title("VIN DECODER PRO 🌐")
+
+if 'vin_input' not in st.session_state:
+    st.session_state.vin_input = ""
+
+# --- БЛОК ВВОДА ---
+col_input, col_paste = st.columns([5, 1], vertical_alignment="bottom")
+
+with col_input:
+    vin_raw = st.text_input(
+        "Введите VIN код:", 
+        max_chars=17, 
+        key="vin_input",
+        help="Поддерживает вставку по Ctrl+V (En/Ru)"
+    ).upper().strip()
+
+with col_paste:
+    st.button("📋 Вставить VIN", on_click=paste_vin_from_clipboard, use_container_width=True)
+
+# Очистка VIN для работы
+vin = re.sub(r'[^A-Z0-9]', '', vin_raw)
+
+# =====================================================================
+# === HTML ГЕНЕРАТОРЫ ===
+# =====================================================================
+def generate_car_html(title, data, bg_color, fg_color, border_col, eng_bg, eng_fg, eng_border):
+    if not data or data.get('error'):
+        return f"""
+        <div class="car-card" style="border-color: {border_col};">
+            <div class="car-title" style="background-color: {bg_color}; color: {fg_color};">{title}</div>
+            <div class="car-name" style="color: #e74c3c;">НЕ НАЙДЕНО / ОШИБКА</div>
+            <div class="engine-box" style="background-color: #fdf5f6; border-color: #fab1a0;">
+                <div class="eng-label" style="color:#fab1a0;">МОДЕЛЬ ДВИГАТЕЛЯ</div>
+                <div class="eng-val" style="color: #e74c3c;">---</div>
+            </div>
+        </div>
+        """
+    return f"""
+    <div class="car-card" style="border-color: {border_col};">
+        <div class="car-title" style="background-color: {bg_color}; color: {fg_color};">{title}</div>
+        <div class="car-name" style="color: {fg_color};">{data.get('car_name', 'Неизвестно')}</div>
+        <div class="car-model">{data.get('model_code', '')}</div>
+        <hr style="margin: 10px 0;">
+        <span class="car-param">Дата:</span> <span class="car-val">{data.get('date', '-')}</span><br>
+        <span class="car-param">Привод:</span> <span class="car-val">{data.get('drive', '-')}</span>
+        <div class="engine-box" style="background-color: {eng_bg}; border-color: {eng_border};">
+            <div class="eng-label" style="color: {eng_border};">МОДЕЛЬ ДВИГАТЕЛЯ</div>
+            <div class="eng-val" style="color: {eng_fg};">{data.get('engine', 'НЕТ ДАННЫХ')}</div>
+        </div>
+    </div>
+    """
+
+def generate_part_html(item):
+    source = item['source']
+    if source == 'AUTODOC': 
+        card_border, code_class = "#90caf9", "background-color: #e3f2fd; color: #0d47a1;"
+    elif source == 'ELCATS': 
+        card_border, code_class = "#a5d6a7", "background-color: #e8f5e9; color: #1b5e20;"
+    else: 
+        card_border, code_class = "#ffcc80", "background-color: #fff3e0; color: #e65100;"
+    
+    if item['code']:
+        return f"""
+        <div class="part-card" style="border-color: {card_border};">
+            <div class="part-title">{item['title']}</div>
+            <div class="part-code" style="{code_class}">{item['code']}</div>
+            <div class="part-desc">{item['desc']}</div>
+        </div>
+        """
+    else:
+        return f"""
+        <div class="part-card" style="border-color: #fab1a0;">
+            <div class="part-title">{item['title']}</div>
+            <div class="part-desc" style="color:red; font-style:italic;">{item['desc']}</div>
+        </div>
+        """
+
+# =====================================================================
 # === ДВИЖОК БРАУЗЕРА ===
 # =====================================================================
 def create_stealth_browser_and_page(playwright_instance, proxy_url=None):
-    args =[
-        '--disable-blink-features=AutomationControlled',
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage'
-    ]
-    
-    # На сервере СТРОГО headless=True
+    args =['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-setuid-sandbox']
     launch_options = {
         'headless': True if IS_SERVER else False,
         'args': args,
@@ -66,8 +154,7 @@ def create_stealth_browser_and_page(playwright_instance, proxy_url=None):
     except: browser = playwright_instance.chromium.launch(**launch_options)
     
     context = browser.new_context(
-        locale="ru-RU", timezone_id="Europe/Moscow", 
-        viewport={'width': 1920, 'height': 1080},
+        locale="ru-RU", timezone_id="Europe/Moscow", viewport={'width': 1920, 'height': 1080},
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     )
     page = context.new_page()
@@ -217,6 +304,7 @@ def get_partkom_details(vin, proxy_url):
         except: data['error'] = True
         finally: browser.close()
     return data
+
 
 # =====================================================================
 # === 2. ПАРСЕРЫ ЗАПЧАСТЕЙ ===
@@ -413,117 +501,27 @@ def run_armtek_part(vin, mode, title):
     if not items: items.append({'source': 'ARMTEK', 'title': title, 'desc': 'Не найдено', 'code': None})
     return items
 
-
 # =====================================================================
-# === STREAMLIT FRONTEND ===
+# === ГЛАВНЫЙ ЦИКЛ ПОИСКА STREAMLIT ===
 # =====================================================================
-st.title("VIN DECODER PRO 🌐")
-
-# --- КНОПКА ВСТАВКИ ИЗ БУФЕРА НА JS (НЕ ТРЕБУЕТ СЕРВЕРНЫХ БИБЛИОТЕК) ---
-components.html("""
-<script>
-function pasteClipboard() {
-    navigator.clipboard.readText().then(text => {
-        const inputs = window.parent.document.querySelectorAll('input[type="text"]');
-        if (inputs.length > 0) {
-            let input = inputs[0];
-            let nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-            nativeInputValueSetter.call(input, text.trim());
-            input.dispatchEvent(new Event("input", { bubbles: true }));
-        }
-    }).catch(err => {
-        alert('Браузер заблокировал доступ к буферу. Просто кликните в поле и нажмите Ctrl+V.');
-    });
-}
-</script>
-<button onclick="pasteClipboard()" style="background:#ecf0f1; border:1px solid #bdc3c7; padding:8px 15px; border-radius:5px; cursor:pointer; font-weight:bold; color:#2c3e50;">📋 Вставить из буфера</button>
-<span style="font-family:sans-serif; font-size:12px; color:#7f8c8d; margin-left: 10px;">(Или кликните в поле ниже и нажмите Ctrl+V)</span>
-""", height=50)
-
-vin_raw = st.text_input("Введите VIN код:")
-# Очищаем VIN от любых пробелов, тире и спецсимволов перед проверкой
-vin = re.sub(r'[^A-Z0-9]', '', vin_raw.upper())
-
-# Выводим подсказку, сколько символов введено
-if len(vin) == 17:
-    st.caption(f"✅ Введено символов: {len(vin)} / 17")
-else:
-    st.caption(f"Введено символов: {len(vin)} / 17")
-
-def generate_car_html(title, data, bg_color, fg_color, border_col, eng_bg, eng_fg, eng_border):
-    if not data or data.get('error'):
-        return f"""
-        <div class="car-card" style="border-color: {border_col};">
-            <div class="car-title" style="background-color: {bg_color}; color: {fg_color};">{title}</div>
-            <div class="car-name" style="color: #e74c3c;">НЕ НАЙДЕНО / ОШИБКА</div>
-            <div class="engine-box" style="background-color: #fdf5f6; border-color: #fab1a0;">
-                <div class="eng-label" style="color:#fab1a0;">МОДЕЛЬ ДВИГАТЕЛЯ</div>
-                <div class="eng-val" style="color: #e74c3c;">---</div>
-            </div>
-        </div>
-        """
-    return f"""
-    <div class="car-card" style="border-color: {border_col};">
-        <div class="car-title" style="background-color: {bg_color}; color: {fg_color};">{title}</div>
-        <div class="car-name" style="color: {fg_color};">{data.get('car_name', 'Неизвестно')}</div>
-        <div class="car-model">{data.get('model_code', '')}</div>
-        <hr style="margin: 10px 0;">
-        <span class="car-param">Дата:</span> <span class="car-val">{data.get('date', '-')}</span><br>
-        <span class="car-param">Привод:</span> <span class="car-val">{data.get('drive', '-')}</span>
-        <div class="engine-box" style="background-color: {eng_bg}; border-color: {eng_border};">
-            <div class="eng-label" style="color: {eng_border};">МОДЕЛЬ ДВИГАТЕЛЯ</div>
-            <div class="eng-val" style="color: {eng_fg};">{data.get('engine', 'НЕТ ДАННЫХ')}</div>
-        </div>
-    </div>
-    """
-
-def generate_part_html(item):
-    source = item['source']
-    if source == 'AUTODOC': 
-        card_border = "#90caf9"
-        code_class = "background-color: #e3f2fd; color: #0d47a1;"
-    elif source == 'ELCATS': 
-        card_border = "#a5d6a7"
-        code_class = "background-color: #e8f5e9; color: #1b5e20;"
-    else: 
-        card_border = "#ffcc80"
-        code_class = "background-color: #fff3e0; color: #e65100;"
-    
-    if item['code']:
-        return f"""
-        <div class="part-card" style="border-color: {card_border};">
-            <div class="part-title">{item['title']}</div>
-            <div class="part-code" style="{code_class}">{item['code']}</div>
-            <div class="part-desc">{item['desc']}</div>
-        </div>
-        """
-    else:
-        return f"""
-        <div class="part-card" style="border-color: #fab1a0;">
-            <div class="part-title">{item['title']}</div>
-            <div class="part-desc" style="color:red; font-style:italic;">{item['desc']}</div>
-        </div>
-        """
 
 if st.button("🔍 ИСКАТЬ АВТО И ЗАПЧАСТИ", type="primary"):
     if len(vin) != 17:
-        st.warning(f"⚠️ Ошибка: VIN должен состоять строго из 17 символов!")
+        st.error(f"Внимание! Длина VIN должна быть строго 17 символов. Вы ввели: {len(vin)}")
     else:
         st.markdown("### 🚘 Данные автомобиля")
         car_cols = st.columns(4)
         car_phs = [col.empty() for col in car_cols]
-        for p in car_phs: p.info("Поиск...")
+        for p in car_phs: p.info("Выполняется поиск...")
 
-        st.markdown("### 🔧 Найденные запчасти (Автопоиск)")
+        st.markdown("### 🔧 Найденные запчасти (Появляются автоматически)")
         parts_status = st.empty()
         p_cols = st.columns(3)
         
-        # Создаем плейсхолдеры для каждой колонки запчастей, чтобы обновлять их в реальном времени
         auto_ph = p_cols[0].empty()
         elcats_ph = p_cols[1].empty()
         armtek_ph = p_cols[2].empty()
 
-        # Стартовые заголовки колонок
         auto_html = "<h4 style='text-align:center; color:#0d47a1;'>AUTODOC</h4>"
         elcats_html = "<h4 style='text-align:center; color:#1b5e20;'>ELCATS (Exist)</h4>"
         armtek_html = "<h4 style='text-align:center; color:#e65100;'>ARMTEK</h4>"
@@ -534,10 +532,7 @@ if st.button("🔍 ИСКАТЬ АВТО И ЗАПЧАСТИ", type="primary"):
         
         parts_search_started = False
         
-        # Запускаем сразу 10 потоков, чтобы ничего не ждало
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            
-            # 1. Задачи поиска АВТО
             car_futs = {
                 executor.submit(get_autodoc_details, vin, PROXY_LIST[0]): (0, "AUTODOC", "#EBF5FB", "#2980B9", "#D6EAF8", "#f4f6f9", "#2c3e50", "#dcdde1"),
                 executor.submit(get_exist_details, vin, PROXY_LIST[1]):   (1, "EXIST", "#E9F7EF", "#27AE60", "#D5F5E3", "#f4f6f9", "#2c3e50", "#dcdde1"),
@@ -548,13 +543,10 @@ if st.button("🔍 ИСКАТЬ АВТО И ЗАПЧАСТИ", type="primary"):
             parts_futs =[]
             all_futs = list(car_futs.keys())
             
-            # АСИНХРОННЫЙ ВЫВОД: Крутим цикл, пока есть хоть один незавершенный поток
             while all_futs:
-                # Ждем, пока завершится ХОТЯ БЫ ОДИН любой поток (авто или запчасть)
                 done, not_done = concurrent.futures.wait(all_futs, return_when=concurrent.futures.FIRST_COMPLETED)
                 
                 for fut in done:
-                    # Если завершился поток поиска АВТО
                     if fut in car_futs:
                         idx, title, bg, fg, border, ebg, efg, eborder = car_futs[fut]
                         try: res = fut.result()
@@ -564,16 +556,14 @@ if st.button("🔍 ИСКАТЬ АВТО И ЗАПЧАСТИ", type="primary"):
                         if eng:
                             ebg, efg, eborder = "#fff0f0", "#c0392b", "#ffcccc"
                             
-                            # МГНОВЕННЫЙ ЗАПУСК ПОИСКА ДЕТАЛЕЙ ПРИ ПЕРВОМ НАЙДЕННОМ ДВС
                             if not parts_search_started and ("G4NA" in eng or "G4KE" in eng):
                                 parts_search_started = True
                                 target_eng = "G4NA" if "G4NA" in eng else "G4KE"
                                 parts_status.success(f"🔥 Обнаружен {target_eng}! Фоновый поиск деталей запущен...")
                                 
-                                # Генерируем задачи для запчастей
                                 tasks =[]
                                 if target_eng == "G4NA":
-                                    tasks =[
+                                    tasks = [
                                         (run_autodoc_part, (vin,["Механизм газораспределения", "Распредвал", "Шестерня распредвала"],['any'],['распредвал', 'впуск'], None, "Распредвал Впуск")),
                                         (run_autodoc_part, (vin,["Механизм газораспределения", "Распредвал", "Шестерня распредвала"], ['any'],['распредвал', 'выпуск'], None, "Распредвал Выпуск")),
                                         (run_elcats_part, (vin, "G4NA_intake", "Распредвал Впуск")),
@@ -591,22 +581,18 @@ if st.button("🔍 ИСКАТЬ АВТО И ЗАПЧАСТИ", type="primary"):
                                         (run_armtek_part, (vin, "G4KE_bracket", "Кронштейн"))
                                     ]
                                 
-                                # Закидываем задачи запчастей в общий пул
                                 for fn, args in tasks:
                                     pf = executor.submit(fn, *args)
                                     parts_futs.append(pf)
-                                    not_done.add(pf) # Добавляем в очередь ожидания
+                                    not_done.add(pf)
 
-                        # Выводим карточку авто
                         html = generate_car_html(title, res, bg, fg, border, ebg, efg, eborder)
                         car_phs[idx].markdown(html, unsafe_allow_html=True)
                         
-                    # Если завершился поток поиска ЗАПЧАСТИ
                     elif fut in parts_futs:
                         try: items = fut.result()
                         except: items =[]
                         
-                        # Моментально дописываем HTML в нужную колонку и обновляем экран
                         for item in items:
                             new_card = generate_part_html(item)
                             if item['source'] == 'AUTODOC':
@@ -619,7 +605,6 @@ if st.button("🔍 ИСКАТЬ АВТО И ЗАПЧАСТИ", type="primary"):
                                 armtek_html += new_card
                                 armtek_ph.markdown(armtek_html, unsafe_allow_html=True)
 
-                # Обновляем список того, что осталось ждать
                 all_futs = list(not_done)
                 
         if parts_search_started:
