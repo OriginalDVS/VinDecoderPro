@@ -1,5 +1,4 @@
 import sys
-import threading
 import re
 import time
 import os
@@ -7,23 +6,15 @@ import random
 import urllib.parse
 import concurrent.futures
 import streamlit as st
-import subprocess
+import streamlit.components.v1 as components
 
-# === АВТОМАТИЧЕСКАЯ УСТАНОВКА ЗАВИСИМОСТЕЙ ===
+# === УСТАНОВКА БРАУЗЕРА ПРИ ЗАПУСКЕ ===
 @st.cache_resource
-def install_dependencies():
-    try:
-        from playwright.sync_api import sync_playwright
-        import pyperclip
-    except ImportError:
-        print("Установка зависимостей...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright", "pyperclip"])
-        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"])
-
-install_dependencies()
+def install_browsers():
+    os.system("playwright install chromium")
+install_browsers()
 
 from playwright.sync_api import sync_playwright
-import pyperclip
 
 # --- КОНФИГУРАЦИЯ ---
 st.set_page_config(page_title="VIN Decoder Ultimate", layout="wide")
@@ -34,110 +25,23 @@ PROXY_LIST = [None, None, None, None]
 # Определение платформы (для скрытия браузера на серверах Linux)
 IS_SERVER = sys.platform.startswith('linux')
 
-# --- ФУНКЦИЯ ВСТАВКИ ИЗ БУФЕРА ---
-def paste_vin_from_clipboard():
-    try:
-        text = pyperclip.paste()
-        # Очистка: оставляем только буквы и цифры, переводим в верхний регистр
-        clean_text = re.sub(r'[^a-zA-Z0-9]', '', text).upper()
-        if clean_text:
-            st.session_state.vin_input = clean_text[:17]
-        else:
-            st.warning("Буфер обмена пуст или не содержит текста")
-    except Exception as e:
-        st.error(f"Ошибка доступа к буферу обмена: {e}")
-
-# =====================================================================
-# === ИНТЕРФЕЙС STREAMLIT (ВЕРХНЯЯ ЧАСТЬ) ===
-# =====================================================================
-
-st.title("VIN DECODER PRO 🌐")
-
-if 'vin_input' not in st.session_state:
-    st.session_state.vin_input = ""
-
-# Создаем колонки: широкая для ввода, узкая для кнопки вставки
-col_input, col_paste = st.columns([5, 1], vertical_alignment="bottom")
-
-with col_input:
-    vin_raw = st.text_input(
-        "Введите VIN код:", 
-        max_chars=17, 
-        key="vin_input",
-        help="Поддерживает вставку по Ctrl+V (En/Ru)"
-    ).upper().strip()
-
-with col_paste:
-    st.button("📋 Вставить VIN", on_click=paste_vin_from_clipboard, use_container_width=True)
-
-# Жесткая очистка от спецсимволов и пробелов
-vin = re.sub(r'[^A-Z0-9]', '', vin_raw)
-
-# Счетчик символов
-if len(vin) == 17:
-    st.caption(f"✅ Введено символов: {len(vin)} / 17")
-else:
-    st.caption(f"❌ Введено символов: {len(vin)} / 17 (Необходимо ровно 17)")
-
-
-# =====================================================================
-# === ГЕНЕРАТОРЫ HTML КАРТОЧЕК (С ИНЛАЙН СТИЛЯМИ ДЛЯ НАДЕЖНОСТИ) ===
-# =====================================================================
-
-def generate_car_html(title, data, bg_color, fg_color, border_col, eng_bg, eng_fg, eng_border):
-    if not data or data.get('error'):
-        return f"""
-        <div style="border: 1px solid {border_col}; border-radius: 8px; padding: 15px; background-color: #ffffff; box-shadow: 0 4px 6px rgba(0,0,0,0.05); height: 100%;">
-            <div style="text-align: center; font-weight: 900; font-size: 16px; margin-bottom: 15px; padding: 5px; border-radius: 4px; background-color: {bg_color}; color: {fg_color};">{title}</div>
-            <div style="font-weight: bold; text-align: center; font-size: 18px; margin-bottom: 5px; color: #e74c3c;">НЕ НАЙДЕНО / ОШИБКА</div>
-            <div style="border: 2px solid #fab1a0; border-radius: 5px; padding: 10px; text-align: center; margin-top: 15px; background-color: #fdf5f6;">
-                <div style="font-size: 11px; font-weight: bold; margin-bottom: 3px; color:#fab1a0;">МОДЕЛЬ ДВИГАТЕЛЯ</div>
-                <div style="font-size: 24px; font-weight: bold; font-family: monospace; color: #e74c3c;">---</div>
-            </div>
-        </div>
-        """
-    return f"""
-    <div style="border: 1px solid {border_col}; border-radius: 8px; padding: 15px; background-color: #ffffff; box-shadow: 0 4px 6px rgba(0,0,0,0.05); height: 100%;">
-        <div style="text-align: center; font-weight: 900; font-size: 16px; margin-bottom: 15px; padding: 5px; border-radius: 4px; background-color: {bg_color}; color: {fg_color};">{title}</div>
-        <div style="font-weight: bold; text-align: center; font-size: 18px; margin-bottom: 5px; color: {fg_color};">{data.get('car_name', 'Неизвестно')}</div>
-        <div style="color: #7f8c8d; text-align: center; font-size: 14px; font-family: monospace; margin-bottom: 10px;">{data.get('model_code', '')}</div>
-        <hr style="margin: 10px 0;">
-        <span style="font-size: 14px; color: #7f8c8d;">Дата:</span> <span style="font-size: 14px; color: #2c3e50; font-weight: bold;">{data.get('date', '-')}</span><br>
-        <span style="font-size: 14px; color: #7f8c8d;">Привод:</span> <span style="font-size: 14px; color: #2c3e50; font-weight: bold;">{data.get('drive', '-')}</span>
-        <div style="border: 2px solid {eng_border}; border-radius: 5px; padding: 10px; text-align: center; margin-top: 15px; background-color: {eng_bg};">
-            <div style="font-size: 11px; font-weight: bold; margin-bottom: 3px; color: {eng_border};">МОДЕЛЬ ДВИГАТЕЛЯ</div>
-            <div style="font-size: 24px; font-weight: bold; font-family: monospace; color: {eng_fg};">{data.get('engine', 'НЕТ ДАННЫХ')}</div>
-        </div>
-    </div>
-    """
-
-def generate_part_html(item):
-    source = item['source']
-    if source == 'AUTODOC': 
-        card_border = "#90caf9"
-        code_style = "background-color: #e3f2fd; color: #0d47a1;"
-    elif source == 'ELCATS': 
-        card_border = "#a5d6a7"
-        code_style = "background-color: #e8f5e9; color: #1b5e20;"
-    else: 
-        card_border = "#ffcc80"
-        code_style = "background-color: #fff3e0; color: #e65100;"
-    
-    if item['code']:
-        return f"""
-        <div style="border: 1px solid {card_border}; border-radius: 8px; padding: 15px; margin-bottom: 10px; background-color: #ffffff;">
-            <div style="font-weight: bold; font-size: 14px; color: #2c3e50; margin-bottom: 10px;">{item['title']}</div>
-            <div style="{code_style} padding: 8px; border-radius: 4px; text-align: center; font-family: monospace; font-size: 18px; font-weight: bold; margin-bottom: 8px;">{item['code']}</div>
-            <div style="font-size: 12px; color: #7f8c8d; line-height: 1.4;">{item['desc']}</div>
-        </div>
-        """
-    else:
-        return f"""
-        <div style="border: 1px solid #fab1a0; border-radius: 8px; padding: 15px; margin-bottom: 10px; background-color: #ffffff;">
-            <div style="font-weight: bold; font-size: 14px; color: #2c3e50; margin-bottom: 10px;">{item['title']}</div>
-            <div style="font-size: 12px; color: red; font-style: italic; line-height: 1.4;">{item['desc']}</div>
-        </div>
-        """
+st.markdown("""
+<style>
+.car-card { border: 1px solid #dcdde1; border-radius: 8px; padding: 15px; background-color: #ffffff; box-shadow: 0 4px 6px rgba(0,0,0,0.05); height: 100%;}
+.car-title { text-align: center; font-weight: 900; font-size: 16px; margin-bottom: 15px; padding: 5px; border-radius: 4px; }
+.car-name { font-weight: bold; text-align: center; font-size: 18px; margin-bottom: 5px; }
+.car-model { color: #7f8c8d; text-align: center; font-size: 14px; font-family: monospace; margin-bottom: 10px; }
+.car-param { font-size: 14px; color: #7f8c8d; }
+.car-val { font-size: 14px; color: #2c3e50; font-weight: bold; }
+.engine-box { border: 2px solid; border-radius: 5px; padding: 10px; text-align: center; margin-top: 15px; }
+.eng-label { font-size: 11px; font-weight: bold; margin-bottom: 3px; }
+.eng-val { font-size: 24px; font-weight: bold; font-family: monospace; }
+.part-card { border: 1px solid; border-radius: 8px; padding: 15px; margin-bottom: 10px; background-color: #ffffff;}
+.part-title { font-weight: bold; font-size: 14px; color: #2c3e50; margin-bottom: 10px; }
+.part-code { padding: 8px; border-radius: 4px; text-align: center; font-family: monospace; font-size: 18px; font-weight: bold; margin-bottom: 8px;}
+.part-desc { font-size: 12px; color: #7f8c8d; line-height: 1.4;}
+</style>
+""", unsafe_allow_html=True)
 
 # =====================================================================
 # === ДВИЖОК БРАУЗЕРА ===
@@ -147,11 +51,12 @@ def create_stealth_browser_and_page(playwright_instance, proxy_url=None):
         '--disable-blink-features=AutomationControlled',
         '--no-sandbox',
         '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
+        '--disable-dev-shm-usage'
     ]
     
+    # На сервере СТРОГО headless=True
     launch_options = {
-        'headless': True if IS_SERVER else False, # На ПК будет открывать окна
+        'headless': True if IS_SERVER else False,
         'args': args,
         'ignore_default_args': ["--enable-automation"]
     }
@@ -170,7 +75,7 @@ def create_stealth_browser_and_page(playwright_instance, proxy_url=None):
     return browser, page
 
 # =====================================================================
-# === ПАРСЕРЫ АВТОМОБИЛЕЙ ===
+# === 1. ПАРСЕРЫ АВТОМОБИЛЕЙ ===
 # =====================================================================
 def get_autodoc_details(vin, proxy_url):
     data = {'car_name': None, 'model_code': None, 'date': None, 'engine': None, 'drive': None, 'error': False}
@@ -313,9 +218,8 @@ def get_partkom_details(vin, proxy_url):
         finally: browser.close()
     return data
 
-
 # =====================================================================
-# === ПАРСЕРЫ ЗАПЧАСТЕЙ ===
+# === 2. ПАРСЕРЫ ЗАПЧАСТЕЙ ===
 # =====================================================================
 def run_autodoc_part(vin, node_path, node_kws, part_kws, code_prefix, title):
     time.sleep(random.uniform(0.1, 0.5))
@@ -509,20 +413,108 @@ def run_armtek_part(vin, mode, title):
     if not items: items.append({'source': 'ARMTEK', 'title': title, 'desc': 'Не найдено', 'code': None})
     return items
 
-# =====================================================================
-# === ГЛАВНЫЙ ЦИКЛ ПОИСКА STREAMLIT ===
-# =====================================================================
 
-if st.button("🔍 ИСКАТЬ ДВС И ЗАПЧАСТИ", type="primary"):
+# =====================================================================
+# === STREAMLIT FRONTEND ===
+# =====================================================================
+st.title("VIN DECODER PRO 🌐")
+
+# --- КНОПКА ВСТАВКИ ИЗ БУФЕРА НА JS (НЕ ТРЕБУЕТ СЕРВЕРНЫХ БИБЛИОТЕК) ---
+components.html("""
+<script>
+function pasteClipboard() {
+    navigator.clipboard.readText().then(text => {
+        const inputs = window.parent.document.querySelectorAll('input[type="text"]');
+        if (inputs.length > 0) {
+            let input = inputs[0];
+            let nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+            nativeInputValueSetter.call(input, text.trim());
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+    }).catch(err => {
+        alert('Браузер заблокировал доступ к буферу. Просто кликните в поле и нажмите Ctrl+V.');
+    });
+}
+</script>
+<button onclick="pasteClipboard()" style="background:#ecf0f1; border:1px solid #bdc3c7; padding:8px 15px; border-radius:5px; cursor:pointer; font-weight:bold; color:#2c3e50;">📋 Вставить из буфера</button>
+<span style="font-family:sans-serif; font-size:12px; color:#7f8c8d; margin-left: 10px;">(Или кликните в поле ниже и нажмите Ctrl+V)</span>
+""", height=50)
+
+vin_raw = st.text_input("Введите VIN код:")
+# Очищаем VIN от любых пробелов, тире и спецсимволов перед проверкой
+vin = re.sub(r'[^A-Z0-9]', '', vin_raw.upper())
+
+# Выводим подсказку, сколько символов введено
+if len(vin) == 17:
+    st.caption(f"✅ Введено символов: {len(vin)} / 17")
+else:
+    st.caption(f"Введено символов: {len(vin)} / 17")
+
+def generate_car_html(title, data, bg_color, fg_color, border_col, eng_bg, eng_fg, eng_border):
+    if not data or data.get('error'):
+        return f"""
+        <div class="car-card" style="border-color: {border_col};">
+            <div class="car-title" style="background-color: {bg_color}; color: {fg_color};">{title}</div>
+            <div class="car-name" style="color: #e74c3c;">НЕ НАЙДЕНО / ОШИБКА</div>
+            <div class="engine-box" style="background-color: #fdf5f6; border-color: #fab1a0;">
+                <div class="eng-label" style="color:#fab1a0;">МОДЕЛЬ ДВИГАТЕЛЯ</div>
+                <div class="eng-val" style="color: #e74c3c;">---</div>
+            </div>
+        </div>
+        """
+    return f"""
+    <div class="car-card" style="border-color: {border_col};">
+        <div class="car-title" style="background-color: {bg_color}; color: {fg_color};">{title}</div>
+        <div class="car-name" style="color: {fg_color};">{data.get('car_name', 'Неизвестно')}</div>
+        <div class="car-model">{data.get('model_code', '')}</div>
+        <hr style="margin: 10px 0;">
+        <span class="car-param">Дата:</span> <span class="car-val">{data.get('date', '-')}</span><br>
+        <span class="car-param">Привод:</span> <span class="car-val">{data.get('drive', '-')}</span>
+        <div class="engine-box" style="background-color: {eng_bg}; border-color: {eng_border};">
+            <div class="eng-label" style="color: {eng_border};">МОДЕЛЬ ДВИГАТЕЛЯ</div>
+            <div class="eng-val" style="color: {eng_fg};">{data.get('engine', 'НЕТ ДАННЫХ')}</div>
+        </div>
+    </div>
+    """
+
+def generate_part_html(item):
+    source = item['source']
+    if source == 'AUTODOC': 
+        card_border = "#90caf9"
+        code_class = "background-color: #e3f2fd; color: #0d47a1;"
+    elif source == 'ELCATS': 
+        card_border = "#a5d6a7"
+        code_class = "background-color: #e8f5e9; color: #1b5e20;"
+    else: 
+        card_border = "#ffcc80"
+        code_class = "background-color: #fff3e0; color: #e65100;"
+    
+    if item['code']:
+        return f"""
+        <div class="part-card" style="border-color: {card_border};">
+            <div class="part-title">{item['title']}</div>
+            <div class="part-code" style="{code_class}">{item['code']}</div>
+            <div class="part-desc">{item['desc']}</div>
+        </div>
+        """
+    else:
+        return f"""
+        <div class="part-card" style="border-color: #fab1a0;">
+            <div class="part-title">{item['title']}</div>
+            <div class="part-desc" style="color:red; font-style:italic;">{item['desc']}</div>
+        </div>
+        """
+
+if st.button("🔍 ИСКАТЬ АВТО И ЗАПЧАСТИ", type="primary"):
     if len(vin) != 17:
-        st.error(f"Внимание! Длина VIN должна быть строго 17 символов. Сейчас: {len(vin)}")
+        st.warning(f"⚠️ Ошибка: VIN должен состоять строго из 17 символов!")
     else:
         st.markdown("### 🚘 Данные автомобиля")
         car_cols = st.columns(4)
         car_phs = [col.empty() for col in car_cols]
-        for p in car_phs: p.info("Выполняется поиск...")
+        for p in car_phs: p.info("Поиск...")
 
-        st.markdown("### 🔧 Найденные запчасти (Появляются автоматически)")
+        st.markdown("### 🔧 Найденные запчасти (Автопоиск)")
         parts_status = st.empty()
         p_cols = st.columns(3)
         
@@ -581,7 +573,7 @@ if st.button("🔍 ИСКАТЬ ДВС И ЗАПЧАСТИ", type="primary"):
                                 # Генерируем задачи для запчастей
                                 tasks =[]
                                 if target_eng == "G4NA":
-                                    tasks = [
+                                    tasks =[
                                         (run_autodoc_part, (vin,["Механизм газораспределения", "Распредвал", "Шестерня распредвала"],['any'],['распредвал', 'впуск'], None, "Распредвал Впуск")),
                                         (run_autodoc_part, (vin,["Механизм газораспределения", "Распредвал", "Шестерня распредвала"], ['any'],['распредвал', 'выпуск'], None, "Распредвал Выпуск")),
                                         (run_elcats_part, (vin, "G4NA_intake", "Распредвал Впуск")),
