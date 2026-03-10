@@ -220,6 +220,49 @@ header {visibility: hidden;}
     padding: 30px 10px;
     font-size: 13px;
 }
+
+/* Loading banner */
+.loading-banner {
+    background: linear-gradient(135deg, #eef4ff 0%, #f0f1ff 100%);
+    border: 1px solid #c8d6f5;
+    border-radius: 10px;
+    padding: 16px 20px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin: 8px 0 14px;
+    animation: bannerFadeIn 0.3s ease-out;
+}
+@keyframes bannerFadeIn {
+    from { opacity: 0; transform: translateY(-6px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+.loading-spinner {
+    width: 22px; height: 22px;
+    border: 3px solid #d0d8f0;
+    border-top-color: #3b6cf5;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading-banner-text {
+    font-size: 15px;
+    font-weight: 600;
+    color: #2c4596;
+}
+.loading-banner-sub {
+    font-size: 12px;
+    color: #6b7cb0;
+    margin-top: 2px;
+}
+
+.loading-banner.done {
+    background: linear-gradient(135deg, #eefbf3 0%, #f0faf5 100%);
+    border-color: #b0e0c8;
+}
+.loading-banner.done .loading-banner-text { color: #1a7d45; }
+.loading-banner.done .loading-banner-sub { color: #5a9c76; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -646,6 +689,9 @@ with col_btn:
     st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
     search_clicked = st.button("🔍 ИСКАТЬ ДВС", use_container_width=True)
 
+# Loading banner placeholder (right under the search bar, highly visible)
+ph_loading_banner = st.empty()
+
 # Placeholders for incremental updates
 car_c1, car_c2 = st.columns(2)
 with car_c1:
@@ -726,6 +772,17 @@ if search_clicked:
         st.session_state.parts = []
         st.session_state.engine_model = ''
 
+        # Show loading banner at top
+        ph_loading_banner.markdown("""
+        <div class="loading-banner">
+            <div class="loading-spinner"></div>
+            <div>
+                <div class="loading-banner-text">🔍 Идёт поиск...</div>
+                <div class="loading-banner-sub">Опрашиваем 4 источника, это может занять до минуты</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
         # Show loading cards
         ph_autodoc.markdown(render_car_card('autodoc', 'AUTODOC', None), unsafe_allow_html=True)
         ph_exist.markdown(render_car_card('exist', 'EXIST / ELCATS', None), unsafe_allow_html=True)
@@ -757,6 +814,15 @@ if search_clicked:
                 ph_status.markdown(
                     f'<div class="status-line"><span class="status-dot working"></span> Авто: {done_n}/4 источников</div>',
                     unsafe_allow_html=True)
+                ph_loading_banner.markdown(f"""
+                <div class="loading-banner">
+                    <div class="loading-spinner"></div>
+                    <div>
+                        <div class="loading-banner-text">🔍 Идёт поиск — определение авто ({done_n}/4)</div>
+                        <div class="loading-banner-sub">Источник {titles[site]} {'✅ найден' if data and not data.get('error') else '❌ не найден'}</div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
 
                 # Detect engine early
                 if not engine_model and data and not data.get('error') and data.get('engine'):
@@ -776,6 +842,15 @@ if search_clicked:
 
         # ---- PHASE 2: Parts (incremental per-task) ----
         if engine_model:
+            ph_loading_banner.markdown(f"""
+            <div class="loading-banner">
+                <div class="loading-spinner"></div>
+                <div>
+                    <div class="loading-banner-text">⚙️ Идёт поиск запчастей для {engine_model}</div>
+                    <div class="loading-banner-sub">Проверяем Autodoc, Elcats и Armtek...</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
             ph_status.markdown(
                 f'<div class="status-line"><span class="status-dot working"></span> Поиск запчастей {engine_model}...</div>',
                 unsafe_allow_html=True)
@@ -815,6 +890,15 @@ if search_clicked:
                     ph_status.markdown(
                         f'<div class="status-line"><span class="status-dot working"></span> Запчасти: {pdone}/{total}</div>',
                         unsafe_allow_html=True)
+                    ph_loading_banner.markdown(f"""
+                    <div class="loading-banner">
+                        <div class="loading-spinner"></div>
+                        <div>
+                            <div class="loading-banner-text">⚙️ Запчасти {engine_model} — {pdone}/{total}</div>
+                            <div class="loading-banner-sub">Найдено деталей: {len(all_parts)}</div>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
 
             st.session_state.parts = all_parts
 
@@ -830,6 +914,18 @@ if search_clicked:
                 ph_parts.markdown('<div class="empty-hint">Запчасти не найдены</div>', unsafe_allow_html=True)
 
         ph_status.markdown('<div class="status-line"><span class="status-dot"></span> ✅ Поиск завершён!</div>', unsafe_allow_html=True)
+        
+        # Replace loading banner with done banner
+        total_parts = len(st.session_state.parts)
+        ph_loading_banner.markdown(f"""
+        <div class="loading-banner done">
+            <div style="font-size:22px; flex-shrink:0;">✅</div>
+            <div>
+                <div class="loading-banner-text">Поиск завершён!</div>
+                <div class="loading-banner-sub">Источников: 4 • Найдено запчастей: {total_parts}</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
 elif st.session_state.engine_model and not st.session_state.parts and st.session_state.results:
     # Manual engine selected via rerun
