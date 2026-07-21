@@ -1,0 +1,26 @@
+name: Keep Streamlit App Awake (Every 5h 58m)
+
+on:
+  schedule:
+    # Запуск планировщика каждые 6 часов (в 00:00, 06:00, 12:00, 18:00)
+    - cron: '0 */6 * * *'
+  workflow_dispatch: # Кнопка для ручного запуска
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # Вычитаем 2 минуты из 6 часов, делая паузу в конце процесса
+      # Это сдвинет время реального коммита на нужный интервал
+      - name: Delay for 2 minutes
+        run: sleep 120
+
+      - name: Make Empty Commit
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@://github.com"
+          git commit --allow-empty -m "Chore: Keep-alive ping for Streamlit Cloud"
+          git push
